@@ -1,36 +1,37 @@
-/// A* shortest path algorithm for indoor navigation.
+/// A* pathfinding algorithm for indoor navigation.
 ///
-/// A* extends Dijkstra's algorithm with a heuristic function that estimates
-/// the remaining distance to the destination. This allows the algorithm to
-/// prioritize exploring nodes that are "closer" to the goal, significantly
-/// reducing the search space in large graphs.
+/// A* extends Dijkstra with a heuristic function that estimates the
+/// remaining distance to the destination. This guides the search toward
+/// the goal, exploring 40–60% fewer nodes than Dijkstra on typical
+/// indoor navigation graphs.
 ///
-/// For indoor navigation, we use 3D Euclidean distance as the heuristic.
-/// This is admissible (never overestimates) because the shortest possible
-/// path between two points is a straight line.
+/// Heuristic: 3D Euclidean distance — admissible (never overestimates)
+/// because a straight line is always ≤ any graph path.
 ///
 /// Performance:
-/// - Best case: O(E) when the heuristic is very accurate
+/// - Best case: O(E) when heuristic is accurate
 /// - Worst case: O((V + E) log V), same as Dijkstra
-/// - Typical indoor navigation: 40-60% fewer nodes explored than Dijkstra
+/// - Typical indoor: 40–60% fewer nodes explored than Dijkstra
 ///
 /// When to use A* over Dijkstra:
-/// - Cross-floor navigation (500+ nodes in the search space)
+/// - Cross-floor navigation (100+ nodes)
 /// - Cross-building navigation
 /// - Real-time rerouting where speed matters
 
 import 'dart:collection';
+import 'dart:math';
 
 import 'models.dart';
 import 'graph.dart';
 
-/// Heuristic function type for A*.
-///
-/// Takes the current node ID and destination node ID,
-/// returns an estimated cost (must never overestimate!).
-typedef HeuristicFunction = double Function(String currentId, String destId);
+// ─────────────────────────────────────────────────────────────────────────────
+// PRIORITY QUEUE ENTRY
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Priority queue entry for A* algorithm.
+/// Min-heap entry sorted by fScore (g + h).
+///
+/// Ties are broken by preferring higher gScore (closer to goal),
+/// then by nodeId for deterministic ordering.
 class _AStarEntry implements Comparable<_AStarEntry> {
   final String nodeId;
   final double fScore; // g(n) + h(n)
@@ -42,59 +43,55 @@ class _AStarEntry implements Comparable<_AStarEntry> {
   int compareTo(_AStarEntry other) {
     final cmp = fScore.compareTo(other.fScore);
     if (cmp != 0) return cmp;
-    // Tie-breaking: prefer nodes with lower g-score (closer to destination)
+    // Tie-break: prefer higher g-score (means lower h, closer to goal)
     final gCmp = other.gScore.compareTo(gScore);
     if (gCmp != 0) return gCmp;
     return nodeId.compareTo(other.nodeId);
   }
 }
 
-/// A* pathfinding algorithm implementation.
+// ─────────────────────────────────────────────────────────────────────────────
+// A* PATHFINDER
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A* pathfinding algorithm optimized for real-time indoor navigation.
 ///
-/// Features:
-/// - 3D Euclidean heuristic (admissible and consistent)
-/// - Floor-transition penalty for better indoor path quality
-/// - Wheelchair accessibility mode
-/// - Search statistics for performance monitoring
-/// - Configurable heuristic weight for bounded suboptimal search
-///
-/// Usage:
 /// ```dart
 /// final astar = AStarPathfinder(graph);
-/// final result = astar.findPath('CS-CORR-1F-01', 'AIML-201');
-/// if (result.path != null) {
-///   print('Distance: ${result.path!.totalDistance}m');
-///   print('Nodes explored: ${result.nodesExplored}');
-/// }
+///
+/// // Simple: get node-ID path
+/// final path = astar.findPath(graph, 'CS-ENT-1F', 'AIML-201');
+/// // → ['CS-ENT-1F', 'CS-CORR-1F-02', ..., 'AIML-201']
+///
+/// // Rich: get full result with stats
+/// final result = astar.findPathWithStats('CS-ENT-1F', 'AIML-201');
+/// print(result.path?.totalDistance);  // 45.2
+/// print(result.nodesExplored);       // 12 (vs 30 with Dijkstra)
 /// ```
 class AStarPathfinder {
   final NavigationGraph graph;
 
-  /// Whether to filter out stairs (wheelchair accessibility mode).
+  /// When true, stairs edges are excluded from pathfinding.
   final bool wheelchairMode;
 
   /// Heuristic weight multiplier.
   ///
-  /// - w = 1.0: Standard A* (optimal path guaranteed)
-  /// - w > 1.0: Weighted A* (faster but potentially suboptimal)
-  /// - w = 0.0: Degrades to Dijkstra
-  ///
-  /// For indoor navigation, w = 1.0 is recommended since optimality matters
-  /// and the graphs are small enough that the speed gain isn't worth the
-  /// path quality loss.
+  /// - `1.0` → Standard A* (optimal path guaranteed)
+  /// - `> 1.0` → Weighted A* (faster but may be suboptimal)
+  /// - `0.0` → Degrades to Dijkstra (no heuristic guidance)
   final double heuristicWeight;
 
-  /// Additional cost penalty for floor transitions.
+  /// Extra cost penalty for each floor transition.
   ///
-  /// This makes the algorithm prefer same-floor routes when alternatives
-  /// exist. Set to 0.0 to disable.
+  /// Makes the algorithm prefer same-floor routes when alternatives exist.
+  /// Set to `0.0` to disable.
   final double floorTransitionPenalty;
 
   const AStarPathfinder(
     this.graph, {
     this.wheelchairMode = false,
     this.heuristicWeight = 1.0,
-    this.floorTransitionPenalty = 5.0, // 5 meter equivalent penalty
+    this.floorTransitionPenalty = 5.0,
   });
 
   // ─────────────────────────────────────────
@@ -103,104 +100,94 @@ class AStarPathfinder {
 
   /// 3D Euclidean distance heuristic.
   ///
-  /// This is admissible (never overestimates) because a straight line
-  /// is always shorter than or equal to any path through the graph.
-  double euclideanHeuristic(String currentId, String destId) {
+  /// Admissible: straight-line distance ≤ any graph path.
+  /// Consistent: h(n) ≤ cost(n→n') + h(n') for all edges.
+  ///
+  /// Uses the node's (x, y, z) coordinates directly.
+  double _euclideanHeuristic(String currentId, String destId) {
     final current = graph.getNode(currentId);
     final dest = graph.getNode(destId);
-    if (current == null || dest == null) return 0;
+    if (current == null || dest == null) return 0.0;
 
     return current.position.distanceTo(dest.position);
   }
 
-  /// Enhanced heuristic with floor transition awareness.
+  /// Enhanced heuristic with floor-transition awareness.
   ///
-  /// Adds a penalty proportional to the number of floor transitions
-  /// needed, which helps guide the search toward stairs/lifts when
-  /// cross-floor navigation is required.
-  double enhancedHeuristic(String currentId, String destId) {
+  /// Adds a penalty proportional to the floor difference, which
+  /// helps guide the search toward stairs/lifts when cross-floor
+  /// navigation is needed.
+  double _enhancedHeuristic(String currentId, String destId) {
     final current = graph.getNode(currentId);
     final dest = graph.getNode(destId);
-    if (current == null || dest == null) return 0;
+    if (current == null || dest == null) return 0.0;
 
     final euclidean = current.position.distanceTo(dest.position);
     final floorDiff = (current.floor - dest.floor).abs();
 
-    // Add floor transition penalty: each floor transition adds some cost
-    // This helps the algorithm find stairs/lifts faster
     return euclidean + floorDiff * floorTransitionPenalty;
   }
 
   // ─────────────────────────────────────────
-  // Pathfinding
+  // Primary API: findPath
   // ─────────────────────────────────────────
 
-  /// Find the shortest path from [startId] to [endId] using A*.
+  /// Find the shortest path between [start] and [end] using A*.
   ///
-  /// Returns an [AStarResult] containing the path (if found) and
-  /// search statistics for performance monitoring.
+  /// Returns an ordered `List<String>` of node IDs from source to
+  /// destination. Returns an **empty list** if:
+  /// - [start] or [end] doesn't exist in the graph
+  /// - No path exists (destination is unreachable)
   ///
-  /// Algorithm:
+  /// Blocked edges are automatically skipped.
+  ///
+  /// **Algorithm:**
   /// 1. Initialize:
-  ///    - g-scores: source = 0, all others = ∞
-  ///    - f-scores: source = h(source), all others = ∞
-  ///    - Open set (priority queue): {source}
+  ///    - gScore[start] = 0, all others = ∞
+  ///    - fScore[start] = h(start, end)
+  ///    - Open set: {start}
   ///    - Closed set: {}
   /// 2. While open set is not empty:
-  ///    a. Pop node with minimum f-score
-  ///    b. If it's the destination → reconstruct path
+  ///    a. Pop node with minimum fScore
+  ///    b. If destination → reconstruct path
   ///    c. Add to closed set
-  ///    d. For each neighbor:
-  ///       - Skip if in closed set
-  ///       - Calculate tentative g-score
-  ///       - If better than current g-score → update and add to open set
-  /// 3. If destination never reached → return null
-  AStarResult findPath(String startId, String endId) {
-    final stopwatch = Stopwatch()..start();
-    int nodesExplored = 0;
-    int nodesExpanded = 0;
-
-    // Validate inputs
-    if (graph.getNode(startId) == null || graph.getNode(endId) == null) {
-      stopwatch.stop();
-      return AStarResult(
-        path: null,
-        nodesExplored: 0,
-        nodesExpanded: 0,
-        computeTimeMs: stopwatch.elapsedMilliseconds,
-      );
+  ///    d. For each active neighbor:
+  ///       - tentative_g = gScore[current] + edge.weight
+  ///       - If tentative_g < gScore[neighbor] → update and push
+  /// 3. If destination never reached → return empty list
+  ///
+  /// Time complexity: O((V + E) log V), typically 40–60% faster than Dijkstra.
+  List<String> findPath(
+    NavigationGraph graph,
+    String start,
+    String end,
+  ) {
+    // ── Validate inputs ──
+    if (!graph.hasNode(start) || !graph.hasNode(end)) {
+      return [];
+    }
+    if (start == end) {
+      return [start];
     }
 
-    if (startId == endId) {
-      final node = graph.getNode(startId)!;
-      stopwatch.stop();
-      return AStarResult(
-        path: NavPath(nodes: [node], edges: [], totalDistance: 0),
-        nodesExplored: 1,
-        nodesExpanded: 0,
-        computeTimeMs: stopwatch.elapsedMilliseconds,
-      );
-    }
+    // Choose heuristic: enhanced for cross-floor, basic for same-floor
+    final isCrossFloor = graph.requiresFloorTransition(start, end);
+    final heuristic = isCrossFloor ? _enhancedHeuristic : _euclideanHeuristic;
 
-    // Choose heuristic based on whether this is cross-floor
-    final heuristic = graph.requiresFloorTransition(startId, endId)
-        ? enhancedHeuristic
-        : euclideanHeuristic;
+    // ── gScore: actual cost from start to each node ──
+    final gScore = <String, double>{start: 0.0};
 
-    // g-score: actual cost from start to this node
-    final gScores = <String, double>{startId: 0};
+    // ── fScore: estimated total cost through each node (g + h) ──
+    final initialH = heuristic(start, end) * heuristicWeight;
+    final fScore = <String, double>{start: initialH};
 
-    // f-score: g + h (estimated total cost through this node)
-    final initialH = heuristic(startId, endId) * heuristicWeight;
-    final fScores = <String, double>{startId: initialH};
+    // ── Predecessor map for path reconstruction ──
+    final cameFrom = <String, String>{};
 
-    // Predecessor map: nodeId → (predecessor, edge used)
-    final cameFrom = <String, (String, NavEdge)>{};
-
-    // Closed set (already fully processed nodes)
+    // ── Closed set: fully processed nodes ──
     final closedSet = <String>{};
 
-    // Open set (priority queue)
+    // ── Open set: priority queue sorted by fScore ──
     final openSet = SplayTreeSet<_AStarEntry>(
       (a, b) {
         final cmp = a.fScore.compareTo(b.fScore);
@@ -211,67 +198,162 @@ class AStarPathfinder {
       },
     );
 
-    openSet.add(_AStarEntry(startId, initialH, 0));
+    openSet.add(_AStarEntry(start, initialH, 0.0));
 
+    // ── Main loop ──
     while (openSet.isNotEmpty) {
-      // Pop node with lowest f-score
+      // Pop node with lowest fScore
+      final current = openSet.first;
+      openSet.remove(current);
+
+      final currentId = current.nodeId;
+
+      // Skip stale entries
+      if (closedSet.contains(currentId)) continue;
+
+      // Destination reached → reconstruct path
+      if (currentId == end) {
+        return _reconstructPath(start, end, cameFrom);
+      }
+
+      // Finalize this node
+      closedSet.add(currentId);
+
+      // Expand active neighbors
+      final neighbors = graph.getNeighbors(
+        currentId,
+        wheelchairMode: wheelchairMode,
+      );
+
+      for (final edge in neighbors) {
+        final neighborId = edge.to;
+
+        // Skip already-finalized nodes
+        if (closedSet.contains(neighborId)) continue;
+
+        // Calculate tentative g-score through current node
+        final tentativeG = gScore[currentId]! +
+            edge.effectiveWeight(wheelchairMode: wheelchairMode);
+
+        final currentG = gScore[neighborId] ?? double.infinity;
+
+        // Found a better path to this neighbor
+        if (tentativeG < currentG) {
+          cameFrom[neighborId] = currentId;
+          gScore[neighborId] = tentativeG;
+
+          final h = heuristic(neighborId, end) * heuristicWeight;
+          final newF = tentativeG + h;
+          fScore[neighborId] = newF;
+
+          // Remove old entry if exists (priority update)
+          if (currentG != double.infinity) {
+            openSet.remove(_AStarEntry(neighborId, currentG + h, currentG));
+          }
+
+          openSet.add(_AStarEntry(neighborId, newF, tentativeG));
+        }
+      }
+    }
+
+    // Destination unreachable
+    return [];
+  }
+
+  // ─────────────────────────────────────────
+  // Rich API: findPathWithStats
+  // ─────────────────────────────────────────
+
+  /// Find the shortest path and return a full [AStarResult] with
+  /// the [NavPath], search statistics, and computation time.
+  ///
+  /// Returns `AStarResult.path == null` if no path exists.
+  AStarResult findPathWithStats(String startId, String endId) {
+    final stopwatch = Stopwatch()..start();
+    int nodesExplored = 0;
+    int nodesExpanded = 0;
+
+    // ── Validate ──
+    if (!graph.hasNode(startId) || !graph.hasNode(endId)) {
+      stopwatch.stop();
+      return AStarResult(
+        path: null,
+        nodesExplored: 0, nodesExpanded: 0,
+        computeTimeMs: stopwatch.elapsedMilliseconds,
+      );
+    }
+    if (startId == endId) {
+      final node = graph.getNode(startId)!;
+      stopwatch.stop();
+      return AStarResult(
+        path: NavPath(nodes: [node], edges: [], totalDistance: 0),
+        nodesExplored: 1, nodesExpanded: 0,
+        computeTimeMs: stopwatch.elapsedMilliseconds,
+      );
+    }
+
+    // ── Setup ──
+    final isCrossFloor = graph.requiresFloorTransition(startId, endId);
+    final heuristic = isCrossFloor ? _enhancedHeuristic : _euclideanHeuristic;
+
+    final gScore = <String, double>{startId: 0.0};
+    final cameFrom = <String, String>{};
+    final closedSet = <String>{};
+
+    final initialH = heuristic(startId, endId) * heuristicWeight;
+    final openSet = SplayTreeSet<_AStarEntry>(
+      (a, b) {
+        final cmp = a.fScore.compareTo(b.fScore);
+        if (cmp != 0) return cmp;
+        final gCmp = b.gScore.compareTo(a.gScore);
+        if (gCmp != 0) return gCmp;
+        return a.nodeId.compareTo(b.nodeId);
+      },
+    );
+    openSet.add(_AStarEntry(startId, initialH, 0.0));
+
+    // ── Main loop ──
+    while (openSet.isNotEmpty) {
       final current = openSet.first;
       openSet.remove(current);
       nodesExplored++;
 
       final currentId = current.nodeId;
-
-      // Skip if already in closed set (stale entry)
       if (closedSet.contains(currentId)) continue;
 
-      // Destination reached — reconstruct path
+      // Destination reached
       if (currentId == endId) {
         stopwatch.stop();
+        final pathIds = _reconstructPath(startId, endId, cameFrom);
         return AStarResult(
-          path: _reconstructPath(startId, endId, cameFrom),
+          path: _buildNavPath(pathIds),
           nodesExplored: nodesExplored,
           nodesExpanded: nodesExpanded,
           computeTimeMs: stopwatch.elapsedMilliseconds,
         );
       }
 
-      // Add to closed set
       closedSet.add(currentId);
       nodesExpanded++;
 
-      // Expand neighbors
-      final edges = graph.getNeighborEdges(
-        currentId,
-        wheelchairMode: wheelchairMode,
-      );
-
-      for (final edge in edges) {
+      for (final edge in graph.getNeighbors(currentId, wheelchairMode: wheelchairMode)) {
         final neighborId = edge.to;
-
-        // Skip if already fully processed
         if (closedSet.contains(neighborId)) continue;
 
-        // Calculate tentative g-score
-        final tentativeG =
-            gScores[currentId]! +
+        final tentativeG = gScore[currentId]! +
             edge.effectiveWeight(wheelchairMode: wheelchairMode);
-
-        final currentG = gScores[neighborId] ?? double.infinity;
+        final currentG = gScore[neighborId] ?? double.infinity;
 
         if (tentativeG < currentG) {
-          // This is a better path to this neighbor
-          cameFrom[neighborId] = (currentId, edge);
-          gScores[neighborId] = tentativeG;
+          cameFrom[neighborId] = currentId;
+          gScore[neighborId] = tentativeG;
 
           final h = heuristic(neighborId, endId) * heuristicWeight;
           final newF = tentativeG + h;
-          fScores[neighborId] = newF;
 
-          // Remove old entry if exists
           if (currentG != double.infinity) {
             openSet.remove(_AStarEntry(neighborId, currentG + h, currentG));
           }
-
           openSet.add(_AStarEntry(neighborId, newF, tentativeG));
         }
       }
@@ -287,79 +369,103 @@ class AStarPathfinder {
     );
   }
 
-  /// Find paths to multiple destinations and return the best one.
+  // ─────────────────────────────────────────
+  // Multi-Destination Search
+  // ─────────────────────────────────────────
+
+  /// Find paths to multiple destinations and return the best (shortest).
   ///
-  /// Useful for "find nearest X" queries where there are multiple
-  /// candidates (e.g., nearest washroom from any building).
+  /// Useful for "find nearest X" when there are multiple candidates
+  /// across different buildings.
   AStarResult findBestPath(String startId, List<String> endIds) {
-    AStarResult? bestResult;
+    AStarResult? best;
 
     for (final endId in endIds) {
-      final result = findPath(startId, endId);
-      if (result.path != null) {
-        if (bestResult == null ||
-            result.path!.totalDistance < bestResult.path!.totalDistance) {
-          bestResult = result;
+      final result = findPathWithStats(startId, endId);
+      if (result.found) {
+        if (best == null || result.path!.totalDistance < best.path!.totalDistance) {
+          best = result;
         }
       }
     }
 
-    return bestResult ??
-        AStarResult(
-          path: null,
-          nodesExplored: 0,
-          nodesExpanded: 0,
-          computeTimeMs: 0,
-        );
+    return best ?? AStarResult(
+      path: null,
+      nodesExplored: 0, nodesExpanded: 0, computeTimeMs: 0,
+    );
   }
 
-  /// Reconstruct path from predecessor map.
-  NavPath _reconstructPath(
-    String startId,
-    String endId,
-    Map<String, (String, NavEdge)> cameFrom,
+  // ─────────────────────────────────────────
+  // Path Reconstruction
+  // ─────────────────────────────────────────
+
+  /// Trace backward through [cameFrom] from [end] to [start],
+  /// then reverse to produce source → destination order.
+  List<String> _reconstructPath(
+    String start,
+    String end,
+    Map<String, String> cameFrom,
   ) {
-    final nodeIds = <String>[];
+    final path = <String>[];
+    String? current = end;
+
+    while (current != null && current != start) {
+      path.add(current);
+      current = cameFrom[current];
+    }
+
+    if (current == start) {
+      path.add(start);
+    }
+
+    return path.reversed.toList();
+  }
+
+  /// Build a full [NavPath] from an ordered list of node IDs.
+  NavPath? _buildNavPath(List<String> pathIds) {
+    if (pathIds.isEmpty) return null;
+
+    final nodes = <NavNode>[];
     final edges = <NavEdge>[];
     double totalDistance = 0;
 
-    String current = endId;
-    while (current != startId) {
-      nodeIds.add(current);
-      final (predId, edge) = cameFrom[current]!;
-      edges.add(edge);
-      totalDistance += edge.weight;
-      current = predId;
+    for (int i = 0; i < pathIds.length; i++) {
+      final node = graph.getNode(pathIds[i]);
+      if (node == null) return null;
+      nodes.add(node);
+
+      if (i < pathIds.length - 1) {
+        final neighborEdges = graph.getNeighbors(pathIds[i], wheelchairMode: wheelchairMode);
+        final edge = neighborEdges.where((e) => e.to == pathIds[i + 1]).firstOrNull;
+        if (edge != null) {
+          edges.add(edge);
+          totalDistance += edge.weight;
+        }
+      }
     }
-    nodeIds.add(startId);
 
-    final nodes = nodeIds.reversed.map((id) => graph.getNode(id)!).toList();
-    final orderedEdges = edges.reversed.toList();
-
-    return NavPath(
-      nodes: nodes,
-      edges: orderedEdges,
-      totalDistance: totalDistance,
-    );
+    return NavPath(nodes: nodes, edges: edges, totalDistance: totalDistance);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RESULT
+// A* RESULT
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Result of an A* pathfinding operation, including search statistics.
+/// Result of an A* pathfinding operation with search statistics.
+///
+/// Use [found] to check if a path exists before accessing [path].
 class AStarResult {
-  /// The shortest path found, or null if no path exists.
+  /// The computed shortest path, or null if unreachable.
   final NavPath? path;
 
-  /// Total number of nodes explored (popped from priority queue).
+  /// Total nodes popped from the priority queue.
   final int nodesExplored;
 
-  /// Total number of nodes expanded (neighbors examined).
+  /// Total nodes whose neighbors were fully examined.
   final int nodesExpanded;
 
-  /// Total computation time in milliseconds.
+  /// Computation time in milliseconds.
   final int computeTimeMs;
 
   const AStarResult({
@@ -369,11 +475,10 @@ class AStarResult {
     required this.computeTimeMs,
   });
 
-  /// Whether a path was found.
+  /// Whether a valid path was found.
   bool get found => path != null;
 
-  /// Search efficiency: ratio of explored nodes to total graph nodes.
-  /// Lower is better — means A* explored fewer nodes.
+  /// Search efficiency: explored / total nodes (lower = better).
   double efficiencyRatio(int totalNodes) =>
       totalNodes > 0 ? nodesExplored / totalNodes : 0;
 

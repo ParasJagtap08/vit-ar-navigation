@@ -554,7 +554,7 @@ class DynamicRerouteEngine {
         graph,
         wheelchairMode: config.wheelchairMode,
       );
-      astarResult = astar.findPath(nearestNode.id, _destinationId!);
+      astarResult = astar.findPathWithStats(nearestNode.id, _destinationId!);
       newPath = astarResult.path;
     } else {
       // Use Dijkstra for same-floor
@@ -746,7 +746,7 @@ class NavigationOrchestrator {
         graph,
         wheelchairMode: config.wheelchairMode,
       );
-      final result = astar.findPath(fromNodeId, toNodeId);
+      final result = astar.findPathWithStats(fromNodeId, toNodeId);
       path = result.path;
       nodesExplored = result.nodesExplored;
     } else {

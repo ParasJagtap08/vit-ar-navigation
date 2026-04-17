@@ -54,7 +54,7 @@ class NavigateToDestinationUseCase {
     if (isCrossFloor || graph.nodeCount > 100) {
       algorithm = 'A*';
       final astar = AStarPathfinder(graph, wheelchairMode: wheelchairMode);
-      final result = astar.findPath(fromNodeId, toNodeId);
+      final result = astar.findPathWithStats(fromNodeId, toNodeId);
       path = result.path;
       nodesExplored = result.nodesExplored;
     } else {

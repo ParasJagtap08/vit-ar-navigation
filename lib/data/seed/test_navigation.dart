@@ -37,7 +37,7 @@ void main() {
   // ─── Test 3: A* — Same floor ───
   print('── Test 3: A* (CS-101 → HOD Office) ──');
   final astar = AStarPathfinder(graph);
-  final result3 = astar.findPath('CS-101', 'CS-HOD-1F');
+  final result3 = astar.findPathWithStats('CS-101', 'CS-HOD-1F');
   assert(result3.found, 'Path should exist');
   print('   Path: ${result3.path!.nodes.map((n) => n.id).join(' → ')}');
   print('   Distance: ${result3.path!.totalDistance.toStringAsFixed(1)}m');
