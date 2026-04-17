@@ -1,422 +1,503 @@
-/// NavigationScreen — Active AR navigation with HUD overlay.
+/// NavigationScreen — displays the active navigation path and status.
+///
+/// Connects to [NavigationBloc] to:
+/// - Show a loading indicator while the path is computing
+/// - Display the computed path (node IDs + distance + ETA)
+/// - Show off-path warnings and reroute status
+/// - Provide a "Navigate" button to trigger pathfinding
+/// - Handle arrival and error states
 
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+
+import '../../core/navigation/models.dart';
+import '../../core/navigation/navigation_controller.dart';
 import '../bloc/navigation_bloc.dart';
-import '../bloc/localization_bloc.dart';
-import '../widgets/confidence_indicator.dart';
 
 class NavigationScreen extends StatefulWidget {
-  final String destinationNodeId;
-  final String destinationName;
-  final String buildingId;
+  /// Pre-selected start node (e.g. from QR scan).
+  final String? initialStartNode;
+
+  /// Pre-selected destination (e.g. from search screen).
+  final String? initialDestination;
 
   const NavigationScreen({
     super.key,
-    required this.destinationNodeId,
-    required this.destinationName,
-    required this.buildingId,
+    this.initialStartNode,
+    this.initialDestination,
   });
 
   @override
   State<NavigationScreen> createState() => _NavigationScreenState();
 }
 
-class _NavigationScreenState extends State<NavigationScreen>
-    with TickerProviderStateMixin {
-  late AnimationController _pulseController;
+class _NavigationScreenState extends State<NavigationScreen> {
+  final _startController = TextEditingController();
+  final _destController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
-
-    // Start navigation
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _startNavigation();
-    });
-  }
-
-  void _startNavigation() {
-    final locState = context.read<LocalizationBloc>().state;
-    String fromNodeId = 'CS-ENT-1F'; // Default fallback
-
-    if (locState is LocalizationActive && locState.position.nearestNodeId != null) {
-      fromNodeId = locState.position.nearestNodeId!;
+    // Pre-fill from arguments
+    if (widget.initialStartNode != null) {
+      _startController.text = widget.initialStartNode!;
+      context.read<NavigationBloc>().add(SetStartNode(widget.initialStartNode!));
     }
-
-    context.read<NavigationBloc>().add(StartNavigation(
-      fromNodeId: fromNodeId,
-      toNodeId: widget.destinationNodeId,
-      buildingId: widget.buildingId,
-    ));
+    if (widget.initialDestination != null) {
+      _destController.text = widget.initialDestination!;
+    }
   }
 
   @override
   void dispose() {
-    _pulseController.dispose();
-    context.read<NavigationBloc>().add(StopNavigation());
+    _startController.dispose();
+    _destController.dispose();
     super.dispose();
+  }
+
+  void _onNavigatePressed() {
+    final start = _startController.text.trim();
+    final dest = _destController.text.trim();
+
+    if (start.isEmpty || dest.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter both start and destination node IDs')),
+      );
+      return;
+    }
+
+    final bloc = context.read<NavigationBloc>();
+    bloc.add(SetStartNode(start));
+    bloc.add(SetDestination(dest));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
+      appBar: AppBar(
+        title: const Text('AR Navigation'),
+        centerTitle: true,
+        elevation: 0,
+        actions: [
+          // Stop navigation button
+          BlocBuilder<NavigationBloc, NavigationBlocState>(
+            builder: (context, state) {
+              if (state is NavigationPathLoaded || state is NavigationLoading) {
+                return IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Stop Navigation',
+                  onPressed: () {
+                    context.read<NavigationBloc>().add(StopNavigation());
+                  },
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+        ],
+      ),
+      body: Column(
         children: [
-          // AR Camera View placeholder
-          // In production: flutter_unity_widget UnityWidget goes here
-          _buildARPlaceholder(),
+          // ─── Input Section ───
+          _buildInputSection(),
 
-          // Navigation HUD overlay
-          _buildHUDOverlay(),
+          const Divider(height: 1),
 
-          // Bottom panel
-          _buildBottomPanel(),
-
-          // Top bar
-          _buildTopBar(),
+          // ─── State-Driven Content ───
+          Expanded(
+            child: BlocConsumer<NavigationBloc, NavigationBlocState>(
+              listener: _onStateChange,
+              builder: (context, state) => switch (state) {
+                NavigationInitial() => _buildIdleView(),
+                NavigationLoading(:final destinationId) => _buildLoadingView(destinationId),
+                NavigationPathLoaded() => _buildPathView(state),
+                NavigationArrived(:final destinationName) => _buildArrivedView(destinationName),
+                NavigationError(:final message) => _buildErrorView(message),
+              },
+            ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildARPlaceholder() {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INPUT SECTION
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  Widget _buildInputSection() {
     return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFF1A1A2E), Color(0xFF0A0E21)],
-        ),
-      ),
-      child: const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.view_in_ar, size: 80, color: Color(0xFF00BCD4)),
-            SizedBox(height: 16),
-            Text(
-              'AR Camera View',
-              style: TextStyle(color: Colors.white54, fontSize: 16),
+      padding: const EdgeInsets.all(16),
+      color: Theme.of(context).colorScheme.surface,
+      child: Column(
+        children: [
+          // Start node
+          TextField(
+            controller: _startController,
+            decoration: InputDecoration(
+              labelText: 'Start Node',
+              hintText: 'e.g. CS-ENT-1F',
+              prefixIcon: const Icon(Icons.my_location, color: Colors.green),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              filled: true,
             ),
-            SizedBox(height: 8),
-            Text(
-              'Unity AR module renders here',
-              style: TextStyle(color: Colors.white30, fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+
+          // Destination node
+          TextField(
+            controller: _destController,
+            decoration: InputDecoration(
+              labelText: 'Destination',
+              hintText: 'e.g. CS-103',
+              prefixIcon: const Icon(Icons.flag, color: Colors.red),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              filled: true,
             ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 12),
+
+          // Navigate button
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              onPressed: _onNavigatePressed,
+              icon: const Icon(Icons.navigation),
+              label: const Text('Navigate', style: TextStyle(fontSize: 16)),
+              style: ElevatedButton.styleFrom(
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildTopBar() {
-    return Positioned(
-      top: 0,
-      left: 0,
-      right: 0,
-      child: SafeArea(
-        child: Container(
-          margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.7),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withOpacity(0.1)),
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATE VIEWS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Idle — no active navigation.
+  Widget _buildIdleView() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.explore, size: 80, color: Colors.grey.shade400),
+          const SizedBox(height: 16),
+          Text(
+            'Enter start and destination to begin',
+            style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
           ),
-          child: Row(
-            children: [
-              GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: const Icon(Icons.close, color: Colors.white70, size: 24),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Navigating to',
-                      style: TextStyle(color: Colors.white38, fontSize: 11),
-                    ),
-                    Text(
-                      widget.destinationName,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 16,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
+        ],
+      ),
+    );
+  }
+
+  /// Loading — path is being computed.
+  Widget _buildLoadingView(String destinationId) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const CircularProgressIndicator(strokeWidth: 3),
+          const SizedBox(height: 24),
+          Text(
+            'Computing path to $destinationId...',
+            style: const TextStyle(fontSize: 16),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Selecting optimal algorithm',
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// PathLoaded — display the computed path.
+  Widget _buildPathView(NavigationPathLoaded state) {
+    return Column(
+      children: [
+        // ── Progress header ──
+        _buildProgressHeader(state),
+
+        // ── Off-path warning ──
+        if (state.isOffPath)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            color: Colors.orange.shade100,
+            child: Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.orange.shade800),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'You are off the path. Rerouting...',
+                    style: TextStyle(color: Colors.orange.shade900, fontWeight: FontWeight.w500),
+                  ),
                 ),
-              ),
-              BlocBuilder<LocalizationBloc, LocalizationState>(
-                builder: (context, state) {
-                  if (state is LocalizationActive) {
-                    return ConfidenceIndicator(confidence: state.position.confidence);
-                  }
-                  return const SizedBox.shrink();
-                },
+              ],
+            ),
+          ),
+
+        // ── Rerouting indicator ──
+        if (state.isRerouting)
+          const LinearProgressIndicator(),
+
+        // ── Path node list ──
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            itemCount: state.path.length,
+            itemBuilder: (context, index) => _buildPathNodeTile(state, index),
+          ),
+        ),
+
+        // ── Action buttons ──
+        _buildActionBar(state),
+      ],
+    );
+  }
+
+  /// Progress header with distance, ETA, and algorithm.
+  Widget _buildProgressHeader(NavigationPathLoaded state) {
+    final totalDist = state.navPath.totalDistance.toStringAsFixed(1);
+    final remaining = state.remainingDistance.toStringAsFixed(1);
+    final eta = state.navPath.estimatedTimeSeconds.toStringAsFixed(0);
+    final progress = 1.0 - (state.remainingDistance / state.navPath.totalDistance).clamp(0.0, 1.0);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Distance and ETA
+          Row(
+            children: [
+              _buildInfoChip(Icons.straighten, '${remaining}m left'),
+              const SizedBox(width: 12),
+              _buildInfoChip(Icons.timer_outlined, '~${eta}s'),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  state.algorithm,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blue.shade800),
+                ),
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
+          const SizedBox(height: 12),
 
-  Widget _buildHUDOverlay() {
-    return BlocBuilder<NavigationBloc, NavigationState>(
-      builder: (context, state) {
-        return switch (state) {
-          NavigationLoading(:final destinationName) =>
-            _buildLoadingOverlay(destinationName),
-          NavigationActive() => _buildActiveHUD(state),
-          NavigationRerouting(:final reason) => _buildReroutingOverlay(reason),
-          NavigationArrived(:final destinationName) =>
-            _buildArrivedOverlay(destinationName),
-          NavigationError(:final message) => _buildErrorOverlay(message),
-          _ => const SizedBox.shrink(),
-        };
-      },
-    );
-  }
-
-  Widget _buildLoadingOverlay(String destination) {
-    return Center(
-      child: Container(
-        padding: const EdgeInsets.all(32),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.8),
-          borderRadius: BorderRadius.circular(24),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(
-              color: Color(0xFF00BCD4),
-              strokeWidth: 3,
+          // Progress bar
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 6,
+              backgroundColor: Colors.grey.shade300,
             ),
-            const SizedBox(height: 20),
-            const Text(
-              'Computing route...',
-              style: TextStyle(color: Colors.white, fontSize: 16),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              destination,
-              style: const TextStyle(color: Colors.white54, fontSize: 13),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActiveHUD(NavigationActive state) {
-    return Positioned(
-      top: 120,
-      left: 16,
-      right: 16,
-      child: AnimatedBuilder(
-        animation: _pulseController,
-        builder: (context, child) {
-          return Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.6),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: const Color(0xFF00BCD4).withOpacity(0.3 + _pulseController.value * 0.2),
-              ),
-            ),
-            child: Row(
-              children: [
-                // Direction icon
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF00BCD4).withOpacity(0.2),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.navigation,
-                    color: Color(0xFF00BCD4),
-                    size: 28,
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        state.currentInstruction ?? 'Follow the AR arrows',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 15,
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        '${state.remainingDistance.toStringAsFixed(0)}m • ${(state.estimatedTimeSeconds / 60).toStringAsFixed(1)} min remaining',
-                        style: const TextStyle(
-                          color: Color(0xFF00BCD4),
-                          fontWeight: FontWeight.w500,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildReroutingOverlay(String reason) {
-    return Center(
-      child: Container(
-        padding: const EdgeInsets.all(24),
-        margin: const EdgeInsets.symmetric(horizontal: 32),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFF9800).withOpacity(0.9),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
-            const SizedBox(height: 16),
-            const Text(
-              'Rerouting...',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-                fontSize: 18,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              reason,
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildArrivedOverlay(String destination) {
-    return Center(
-      child: Container(
-        padding: const EdgeInsets.all(32),
-        margin: const EdgeInsets.symmetric(horizontal: 32),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0xFF1B5E20), Color(0xFF4CAF50)],
           ),
-          borderRadius: BorderRadius.circular(24),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF4CAF50).withOpacity(0.4),
-              blurRadius: 30,
-              spreadRadius: 5,
-            ),
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.check_circle, color: Colors.white, size: 64),
-            const SizedBox(height: 16),
-            const Text(
-              'You Have Arrived!',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w800,
-                fontSize: 22,
-              ),
-            ),
-            const SizedBox(height: 8),
+          const SizedBox(height: 6),
+
+          // Instruction
+          if (state.instruction != null)
             Text(
-              destination,
-              style: const TextStyle(color: Colors.white70, fontSize: 15),
+              state.instruction!,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
             ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: const Color(0xFF1B5E20),
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-              child: const Text('Done', style: TextStyle(fontWeight: FontWeight.w700)),
-            ),
-          ],
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildErrorOverlay(String message) {
-    return Center(
-      child: Container(
-        padding: const EdgeInsets.all(24),
-        margin: const EdgeInsets.symmetric(horizontal: 32),
-        decoration: BoxDecoration(
-          color: const Color(0xFFB71C1C).withOpacity(0.9),
-          borderRadius: BorderRadius.circular(20),
+  /// Single node tile in the path list.
+  Widget _buildPathNodeTile(NavigationPathLoaded state, int index) {
+    final nodeId = state.path[index];
+    final node = state.navPath.nodes[index];
+    final isCurrentSegment = index == state.currentSegmentIndex;
+    final isPast = index < state.currentSegmentIndex;
+    final isDestination = index == state.path.length - 1;
+    final isStart = index == 0;
+
+    // Icon based on node type
+    IconData icon;
+    Color iconColor;
+    if (isStart) {
+      icon = Icons.my_location;
+      iconColor = Colors.green;
+    } else if (isDestination) {
+      icon = Icons.flag;
+      iconColor = Colors.red;
+    } else {
+      switch (node.type) {
+        case NodeType.room:
+        case NodeType.lab:
+        case NodeType.office:
+          icon = Icons.door_front_door;
+          iconColor = Colors.blue;
+        case NodeType.stairs:
+          icon = Icons.stairs;
+          iconColor = Colors.orange;
+        case NodeType.lift:
+          icon = Icons.elevator;
+          iconColor = Colors.purple;
+        case NodeType.washroom:
+          icon = Icons.wc;
+          iconColor = Colors.teal;
+        case NodeType.corridor:
+        case NodeType.junction:
+          icon = Icons.timeline;
+          iconColor = Colors.grey;
+        default:
+          icon = Icons.circle;
+          iconColor = Colors.grey;
+      }
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        color: isCurrentSegment
+            ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.5)
+            : null,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: ListTile(
+        leading: Icon(icon, color: isPast ? iconColor.withOpacity(0.4) : iconColor),
+        title: Text(
+          node.displayName,
+          style: TextStyle(
+            fontWeight: isCurrentSegment ? FontWeight.bold : FontWeight.normal,
+            color: isPast ? Colors.grey : null,
+          ),
         ),
+        subtitle: Text(
+          nodeId,
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+        ),
+        trailing: isPast
+            ? Icon(Icons.check_circle, color: Colors.green.shade400, size: 20)
+            : isCurrentSegment
+                ? const Icon(Icons.navigation, color: Colors.blue, size: 20)
+                : null,
+        dense: true,
+      ),
+    );
+  }
+
+  /// Bottom action bar with reroute and stop buttons.
+  Widget _buildActionBar(NavigationPathLoaded state) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4, offset: const Offset(0, -2))],
+      ),
+      child: Row(
+        children: [
+          // Reroute button
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () {
+                context.read<NavigationBloc>().add(RequestReroute());
+              },
+              icon: const Icon(Icons.alt_route),
+              label: const Text('Reroute'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+
+          // Stop button
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: () {
+                context.read<NavigationBloc>().add(StopNavigation());
+              },
+              icon: const Icon(Icons.stop),
+              label: const Text('Stop'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red.shade400,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Arrived — user reached the destination.
+  Widget _buildArrivedView(String destinationName) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.check_circle, size: 80, color: Colors.green),
+          const SizedBox(height: 16),
+          const Text('You have arrived!', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Text(destinationName, style: TextStyle(fontSize: 16, color: Colors.grey.shade600)),
+          const SizedBox(height: 32),
+          ElevatedButton.icon(
+            onPressed: () {
+              context.read<NavigationBloc>().add(StopNavigation());
+            },
+            icon: const Icon(Icons.home),
+            label: const Text('Back to Home'),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Error — display error message with retry.
+  Widget _buildErrorView(String message) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.error_outline, color: Colors.white, size: 48),
+            const Icon(Icons.error_outline, size: 64, color: Colors.red),
             const SizedBox(height: 16),
             Text(
               message,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
               textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16),
             ),
-            const SizedBox(height: 20),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                OutlinedButton(
-                  onPressed: () => Navigator.pop(context),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    side: const BorderSide(color: Colors.white54),
-                  ),
-                  child: const Text('Go Back'),
-                ),
-                const SizedBox(width: 12),
-                ElevatedButton(
-                  onPressed: _startNavigation,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xFFB71C1C),
-                  ),
-                  child: const Text('Retry'),
-                ),
-              ],
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _onNavigatePressed,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Retry'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
             ),
           ],
         ),
@@ -424,124 +505,41 @@ class _NavigationScreenState extends State<NavigationScreen>
     );
   }
 
-  Widget _buildBottomPanel() {
-    return Positioned(
-      bottom: 0,
-      left: 0,
-      right: 0,
-      child: BlocBuilder<NavigationBloc, NavigationState>(
-        builder: (context, state) {
-          if (state is! NavigationActive) return const SizedBox.shrink();
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HELPERS
+  // ═══════════════════════════════════════════════════════════════════════════
 
-          return Container(
-            padding: EdgeInsets.fromLTRB(
-              16, 16, 16, MediaQuery.of(context).padding.bottom + 16,
-            ),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.black.withOpacity(0),
-                  Colors.black.withOpacity(0.8),
-                  Colors.black.withOpacity(0.95),
-                ],
-              ),
-            ),
-            child: Row(
-              children: [
-                // Progress info
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Progress bar
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
-                        child: LinearProgressIndicator(
-                          value: 1.0 -
-                              (state.remainingDistance / state.path.totalDistance)
-                                  .clamp(0.0, 1.0),
-                          backgroundColor: Colors.white12,
-                          valueColor: const AlwaysStoppedAnimation(Color(0xFF00BCD4)),
-                          minHeight: 4,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          _InfoChip(
-                            icon: Icons.straighten,
-                            value: '${state.remainingDistance.toStringAsFixed(0)}m',
-                          ),
-                          const SizedBox(width: 16),
-                          _InfoChip(
-                            icon: Icons.timer,
-                            value: '${(state.estimatedTimeSeconds / 60).toStringAsFixed(1)} min',
-                          ),
-                          if (state.path.hasFloorTransition) ...[
-                            const SizedBox(width: 16),
-                            _InfoChip(
-                              icon: Icons.layers,
-                              value: 'Floors: ${state.path.floorsTraversed.join(",")}',
-                            ),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 16),
-                // Stop button
-                GestureDetector(
-                  onTap: () {
-                    context.read<NavigationBloc>().add(StopNavigation());
-                    Navigator.pop(context);
-                  },
-                  child: Container(
-                    width: 52,
-                    height: 52,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFD32F2F),
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFFD32F2F).withOpacity(0.4),
-                          blurRadius: 12,
-                        ),
-                      ],
-                    ),
-                    child: const Icon(Icons.stop, color: Colors.white, size: 28),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-class _InfoChip extends StatelessWidget {
-  final IconData icon;
-  final String value;
-
-  const _InfoChip({required this.icon, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
+  /// Info chip (icon + label).
+  Widget _buildInfoChip(IconData icon, String label) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, color: Colors.white38, size: 16),
+        Icon(icon, size: 16, color: Colors.grey.shade700),
         const SizedBox(width: 4),
-        Text(
-          value,
-          style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500),
-        ),
+        Text(label, style: TextStyle(fontSize: 14, color: Colors.grey.shade800)),
       ],
     );
+  }
+
+  /// React to state changes for side-effects (snackbar, etc).
+  void _onStateChange(BuildContext context, NavigationBlocState state) {
+    switch (state) {
+      case NavigationArrived(:final destinationName):
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('🎉 Arrived at $destinationName!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      case NavigationError(:final message):
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(message), backgroundColor: Colors.red.shade400),
+        );
+      case NavigationPathLoaded(isRerouting: false, isOffPath: false):
+        // Path loaded or reroute complete — no action needed
+        break;
+      default:
+        break;
+    }
   }
 }
