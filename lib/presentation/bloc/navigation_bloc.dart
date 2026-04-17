@@ -1,145 +1,179 @@
-/// NavigationBloc — owns the full navigation lifecycle.
+/// NavigationBloc — connects the NavigationController to the Flutter UI.
 ///
-/// State machine:
-///   Idle → Loading → Active ↔ Rerouting → Arrived
-///                  ↓
-///                Error
+/// This BLoC translates user interactions (events) into navigation state
+/// changes, using [NavigationController] for all pathfinding logic.
+///
+/// ```dart
+/// BlocProvider(
+///   create: (_) => NavigationBloc(controller: navigationController),
+///   child: NavigationScreen(),
+/// )
+///
+/// // Dispatch events:
+/// bloc.add(SetStartNode('CS-CORR-1F-01'));
+/// bloc.add(SetDestination('CS-103'));
+/// bloc.add(UpdatePosition(Position3D(x: 10, y: 0, z: 15)));
+///
+/// // React to states:
+/// BlocBuilder<NavigationBloc, NavigationBlocState>(
+///   builder: (context, state) => switch (state) {
+///     NavigationInitial()   => _buildIdle(),
+///     NavigationLoading()   => _buildLoading(),
+///     NavigationPathLoaded() => _buildPath(state.path),
+///     NavigationError()     => _buildError(state.message),
+///   },
+/// )
+/// ```
 
 import 'dart:async';
+
 import 'package:flutter_bloc/flutter_bloc.dart';
+
 import '../../core/navigation/models.dart';
-import '../../core/navigation/graph.dart';
-import '../../core/navigation/dynamic_reroute.dart';
-import '../../domain/usecases/navigation_usecases.dart';
-import '../../domain/repositories/navigation_repository.dart';
+import '../../core/navigation/navigation_controller.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EVENTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-sealed class NavigationEvent {}
+/// Base class for all navigation events.
+sealed class NavigationBlocEvent {}
 
-/// User taps "Navigate" to a destination.
-class StartNavigation extends NavigationEvent {
-  final String fromNodeId;
-  final String toNodeId;
-  final String buildingId;
-  final bool wheelchairMode;
-
-  StartNavigation({
-    required this.fromNodeId,
-    required this.toNodeId,
-    required this.buildingId,
-    this.wheelchairMode = false,
-  });
+/// User's current position was identified (via QR scan or manual selection).
+class SetStartNode extends NavigationBlocEvent {
+  final String nodeId;
+  SetStartNode(this.nodeId);
 }
 
-/// User taps "Stop Navigation".
-class StopNavigation extends NavigationEvent {}
-
-/// Real-time position update from localization engine.
-class PositionUpdated extends NavigationEvent {
-  final UserPosition position;
-  PositionUpdated(this.position);
+/// User selected a destination to navigate to.
+///
+/// This triggers path computation automatically.
+class SetDestination extends NavigationBlocEvent {
+  final String nodeId;
+  SetDestination(this.nodeId);
 }
 
-/// Firebase reports a blocked edge.
-class EdgeBlocked extends NavigationEvent {
+/// User's position was updated (from AR tracking / VIO).
+///
+/// Called every ~100ms during active navigation.
+class UpdatePosition extends NavigationBlocEvent {
+  final Position3D position;
+  UpdatePosition(this.position);
+}
+
+/// A corridor edge was blocked (from Firebase real-time listener).
+class EdgeBlocked extends NavigationBlocEvent {
   final String edgeId;
   EdgeBlocked(this.edgeId);
 }
 
-/// Firebase reports an edge is restored.
-class EdgeRestored extends NavigationEvent {
+/// A previously blocked edge was restored.
+class EdgeRestored extends NavigationBlocEvent {
   final String edgeId;
   EdgeRestored(this.edgeId);
 }
 
-/// User requests manual reroute.
-class RequestReroute extends NavigationEvent {}
+/// User manually requests a reroute.
+class RequestReroute extends NavigationBlocEvent {}
 
-/// User changes floor (stairs/lift event).
-class FloorTransitionDetected extends NavigationEvent {
+/// User changed floors (detected via stairs/lift).
+class FloorChanged extends NavigationBlocEvent {
   final int newFloor;
-  FloorTransitionDetected(this.newFloor);
+  FloorChanged(this.newFloor);
 }
 
-/// Find nearest amenity (washroom, stairs, etc.).
-class FindNearestAmenity extends NavigationEvent {
-  final NodeType amenityType;
-  FindNearestAmenity(this.amenityType);
-}
+/// User wants to stop navigation and return to idle.
+class StopNavigation extends NavigationBlocEvent {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STATES
 // ─────────────────────────────────────────────────────────────────────────────
 
-sealed class NavigationState {}
+/// Base class for all navigation states.
+sealed class NavigationBlocState {}
 
-class NavigationIdle extends NavigationState {}
+/// No active navigation — waiting for start node and destination.
+class NavigationInitial extends NavigationBlocState {}
 
-class NavigationLoading extends NavigationState {
-  final String destinationName;
-  NavigationLoading(this.destinationName);
+/// Path is being computed.
+class NavigationLoading extends NavigationBlocState {
+  final String destinationId;
+  NavigationLoading(this.destinationId);
 }
 
-class NavigationActive extends NavigationState {
-  final NavPath path;
-  final NavigationGraph graph;
-  final int currentWaypointIndex;
+/// Path has been computed and navigation is active.
+class NavigationPathLoaded extends NavigationBlocState {
+  /// Ordered list of node IDs from source to destination.
+  final List<String> path;
+
+  /// Full NavPath object with nodes, edges, distance, and ETA.
+  final NavPath navPath;
+
+  /// Algorithm used ('A*' or 'Dijkstra').
+  final String algorithm;
+
+  /// Computation time in milliseconds.
+  final int computeTimeMs;
+
+  /// Distance remaining to destination (meters).
   final double remainingDistance;
-  final double estimatedTimeSeconds;
-  final String? currentInstruction;
-  final double distanceToPath;
 
-  NavigationActive({
+  /// Current segment index on the path.
+  final int currentSegmentIndex;
+
+  /// Turn-by-turn instruction for the user.
+  final String? instruction;
+
+  /// Whether the user is currently off-path.
+  final bool isOffPath;
+
+  /// Whether a reroute is in progress.
+  final bool isRerouting;
+
+  NavigationPathLoaded({
     required this.path,
-    required this.graph,
-    this.currentWaypointIndex = 0,
-    required this.remainingDistance,
-    required this.estimatedTimeSeconds,
-    this.currentInstruction,
-    this.distanceToPath = 0,
-  });
-
-  NavigationActive copyWith({
-    NavPath? path,
-    int? currentWaypointIndex,
+    required this.navPath,
+    required this.algorithm,
+    this.computeTimeMs = 0,
     double? remainingDistance,
-    double? estimatedTimeSeconds,
-    String? currentInstruction,
-    double? distanceToPath,
+    this.currentSegmentIndex = 0,
+    this.instruction,
+    this.isOffPath = false,
+    this.isRerouting = false,
+  }) : remainingDistance = remainingDistance ?? navPath.totalDistance;
+
+  /// Create a copy with updated progress fields.
+  NavigationPathLoaded copyWith({
+    double? remainingDistance,
+    int? currentSegmentIndex,
+    String? instruction,
+    bool? isOffPath,
+    bool? isRerouting,
+    NavPath? navPath,
+    List<String>? path,
   }) {
-    return NavigationActive(
+    return NavigationPathLoaded(
       path: path ?? this.path,
-      graph: graph,
-      currentWaypointIndex: currentWaypointIndex ?? this.currentWaypointIndex,
+      navPath: navPath ?? this.navPath,
+      algorithm: algorithm,
+      computeTimeMs: computeTimeMs,
       remainingDistance: remainingDistance ?? this.remainingDistance,
-      estimatedTimeSeconds: estimatedTimeSeconds ?? this.estimatedTimeSeconds,
-      currentInstruction: currentInstruction ?? this.currentInstruction,
-      distanceToPath: distanceToPath ?? this.distanceToPath,
+      currentSegmentIndex: currentSegmentIndex ?? this.currentSegmentIndex,
+      instruction: instruction ?? this.instruction,
+      isOffPath: isOffPath ?? this.isOffPath,
+      isRerouting: isRerouting ?? this.isRerouting,
     );
   }
 }
 
-class NavigationRerouting extends NavigationState {
-  final NavPath oldPath;
-  final String reason;
-  NavigationRerouting({required this.oldPath, required this.reason});
-}
-
-class NavigationArrived extends NavigationState {
+/// User has arrived at the destination.
+class NavigationArrived extends NavigationBlocState {
   final String destinationName;
-  final double totalDistance;
-  final double totalTimeSeconds;
-  NavigationArrived({
-    required this.destinationName,
-    required this.totalDistance,
-    required this.totalTimeSeconds,
-  });
+  NavigationArrived(this.destinationName);
 }
 
-class NavigationError extends NavigationState {
+/// Navigation error — display message to user.
+class NavigationError extends NavigationBlocState {
   final String message;
   NavigationError(this.message);
 }
@@ -148,262 +182,261 @@ class NavigationError extends NavigationState {
 // BLOC
 // ─────────────────────────────────────────────────────────────────────────────
 
-class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
-  final NavigateToDestinationUseCase _navigateUseCase;
-  final FindNearestAmenityUseCase _amenityUseCase;
-  final WatchBlockedEdgesUseCase _watchEdgesUseCase;
+/// BLoC that bridges [NavigationController] with the Flutter UI layer.
+///
+/// The BLoC:
+/// 1. Receives user events (SetStartNode, SetDestination, UpdatePosition)
+/// 2. Delegates to [NavigationController] for pathfinding and rerouting
+/// 3. Listens to controller events for async updates (reroutes, arrivals)
+/// 4. Emits states for the UI to render
+class NavigationBloc extends Bloc<NavigationBlocEvent, NavigationBlocState> {
+  final NavigationController controller;
 
-  NavigationOrchestrator? _orchestrator;
-  StreamSubscription? _edgeSubscription;
-  StreamSubscription? _rerouteSubscription;
-  String? _currentBuildingId;
-  DateTime? _navigationStartTime;
+  /// Subscription to controller's event stream.
+  StreamSubscription<NavigationEvent>? _controllerSub;
 
-  NavigationBloc({
-    required NavigateToDestinationUseCase navigateUseCase,
-    required FindNearestAmenityUseCase amenityUseCase,
-    required WatchBlockedEdgesUseCase watchEdgesUseCase,
-  })  : _navigateUseCase = navigateUseCase,
-        _amenityUseCase = amenityUseCase,
-        _watchEdgesUseCase = watchEdgesUseCase,
-        super(NavigationIdle()) {
-    on<StartNavigation>(_onStartNavigation);
-    on<StopNavigation>(_onStopNavigation);
-    on<PositionUpdated>(_onPositionUpdated);
+  /// Last known algorithm used (for UI display).
+  String _lastAlgorithm = '';
+
+  NavigationBloc({required this.controller}) : super(NavigationInitial()) {
+    // ── Register public event handlers ──
+    on<SetStartNode>(_onSetStartNode);
+    on<SetDestination>(_onSetDestination);
+    on<UpdatePosition>(_onUpdatePosition);
     on<EdgeBlocked>(_onEdgeBlocked);
     on<EdgeRestored>(_onEdgeRestored);
     on<RequestReroute>(_onRequestReroute);
-    on<FloorTransitionDetected>(_onFloorTransition);
-    on<FindNearestAmenity>(_onFindNearestAmenity);
-  }
+    on<FloorChanged>(_onFloorChanged);
+    on<StopNavigation>(_onStopNavigation);
 
-  // ─────────────────────────────────────────
-  // Event Handlers
-  // ─────────────────────────────────────────
-
-  Future<void> _onStartNavigation(
-    StartNavigation event,
-    Emitter<NavigationState> emit,
-  ) async {
-    emit(NavigationLoading(event.toNodeId));
-
-    try {
-      final result = await _navigateUseCase.execute(
-        fromNodeId: event.fromNodeId,
-        toNodeId: event.toNodeId,
-        buildingId: event.buildingId,
-        wheelchairMode: event.wheelchairMode,
-      );
-
-      if (!result.isSuccess || result.path == null) {
-        emit(NavigationError(result.errorMessage ?? 'Navigation failed'));
-        return;
-      }
-
-      _currentBuildingId = event.buildingId;
-      _navigationStartTime = DateTime.now();
-
-      // Create orchestrator
-      _orchestrator = NavigationOrchestrator(
-        graph: result.graph!,
-        config: RerouteConfig(wheelchairMode: event.wheelchairMode),
-      );
-      _orchestrator!.startNavigation(
-        fromNodeId: event.fromNodeId,
-        toNodeId: event.toNodeId,
-      );
-
-      // Start watching blocked edges
-      _startEdgeWatcher(event.buildingId);
-
-      // Listen to reroute stream
-      _rerouteSubscription = _orchestrator!.rerouteStream.listen((decision) {
-        if (decision is RerouteNeeded) {
-          add(PositionUpdated(UserPosition(
-            position: Position3D(x: 0, y: 0, z: 0),
-            confidence: 0,
-            floor: 0,
-            building: '',
-            timestamp: DateTime.now(),
-            source: PositionSource.manual,
-          )));
-        }
-      });
-
-      emit(NavigationActive(
-        path: result.path!,
-        graph: result.graph!,
-        remainingDistance: result.path!.totalDistance,
-        estimatedTimeSeconds: result.path!.estimatedTimeSeconds,
-        currentInstruction: 'Start walking toward ${result.path!.nodes[1].displayName}',
+    // ── Register internal sync event handlers ──
+    on<_SyncPathLoaded>((event, emit) {
+      final pathIds = event.path.nodes.map((n) => n.id).toList();
+      emit(NavigationPathLoaded(
+        path: pathIds,
+        navPath: event.path,
+        algorithm: event.algorithm,
+        computeTimeMs: event.computeTimeMs,
       ));
-    } catch (e) {
-      emit(NavigationError('Navigation failed: $e'));
-    }
-  }
+    });
 
-  void _onStopNavigation(
-    StopNavigation event,
-    Emitter<NavigationState> emit,
-  ) {
-    _cleanup();
-    emit(NavigationIdle());
-  }
-
-  void _onPositionUpdated(
-    PositionUpdated event,
-    Emitter<NavigationState> emit,
-  ) {
-    if (_orchestrator == null || state is! NavigationActive) return;
-    final currentState = state as NavigationActive;
-
-    final decision = _orchestrator!.onPositionUpdate(event.position.position);
-
-    switch (decision) {
-      case OnTrack(:final remainingDistance, :final currentSegmentIndex, :final distanceToPath):
-        // Check if arrived
-        if (remainingDistance < 2.0) {
-          final elapsed = DateTime.now().difference(_navigationStartTime!);
-          emit(NavigationArrived(
-            destinationName: currentState.path.destination.displayName,
-            totalDistance: currentState.path.totalDistance,
-            totalTimeSeconds: elapsed.inSeconds.toDouble(),
-          ));
-          _cleanup();
-          return;
-        }
-        emit(currentState.copyWith(
-          currentWaypointIndex: currentSegmentIndex,
-          remainingDistance: remainingDistance,
-          estimatedTimeSeconds: remainingDistance / 1.2,
-          distanceToPath: distanceToPath,
-        ));
-
-      case DriftWarning(:final distanceToPath, :final timeUntilReroute):
-        emit(currentState.copyWith(
-          distanceToPath: distanceToPath,
-          currentInstruction: 'You\'re off path. Rerouting in ${timeUntilReroute.inSeconds}s...',
-        ));
-
-      case RerouteNeeded(:final newPath, :final description):
-        emit(NavigationActive(
-          path: newPath,
-          graph: currentState.graph,
-          remainingDistance: newPath.totalDistance,
-          estimatedTimeSeconds: newPath.estimatedTimeSeconds,
-          currentInstruction: description,
-        ));
-
-      case RerouteFailed(:final message):
-        emit(NavigationError(message));
-    }
-  }
-
-  void _onEdgeBlocked(EdgeBlocked event, Emitter<NavigationState> emit) {
-    if (_orchestrator == null) return;
-    final decision = _orchestrator!.onEdgeBlocked(event.edgeId);
-    _handleRerouteDecision(decision, emit);
-  }
-
-  void _onEdgeRestored(EdgeRestored event, Emitter<NavigationState> emit) {
-    _orchestrator?.onEdgeRestored(event.edgeId);
-  }
-
-  void _onRequestReroute(RequestReroute event, Emitter<NavigationState> emit) {
-    if (_orchestrator == null || state is! NavigationActive) return;
-    final currentState = state as NavigationActive;
-    final decision = _orchestrator!.onManualReroute(
-      currentState.path.nodes[currentState.currentWaypointIndex].position,
-    );
-    _handleRerouteDecision(decision, emit);
-  }
-
-  void _onFloorTransition(
-    FloorTransitionDetected event,
-    Emitter<NavigationState> emit,
-  ) {
-    if (_orchestrator == null || state is! NavigationActive) return;
-    final currentState = state as NavigationActive;
-    final decision = _orchestrator!.onFloorChanged(
-      currentState.path.nodes[currentState.currentWaypointIndex].position,
-      event.newFloor,
-    );
-    _handleRerouteDecision(decision, emit);
-  }
-
-  Future<void> _onFindNearestAmenity(
-    FindNearestAmenity event,
-    Emitter<NavigationState> emit,
-  ) async {
-    if (state is! NavigationActive || _currentBuildingId == null) return;
-    final currentState = state as NavigationActive;
-    final currentNodeId =
-        currentState.path.nodes[currentState.currentWaypointIndex].id;
-
-    final path = await _amenityUseCase.execute(
-      fromNodeId: currentNodeId,
-      buildingId: _currentBuildingId!,
-      amenityType: event.amenityType,
-    );
-
-    if (path != null) {
-      emit(NavigationActive(
-        path: path,
-        graph: currentState.graph,
-        remainingDistance: path.totalDistance,
-        estimatedTimeSeconds: path.estimatedTimeSeconds,
-        currentInstruction: 'Nearest ${event.amenityType.name}: ${path.destination.displayName}',
+    on<_SyncPathRerouted>((event, emit) {
+      final pathIds = event.newPath.nodes.map((n) => n.id).toList();
+      emit(NavigationPathLoaded(
+        path: pathIds,
+        navPath: event.newPath,
+        algorithm: _lastAlgorithm,
+        isRerouting: false,
       ));
-    }
-  }
+    });
 
-  // ─────────────────────────────────────────
-  // Helpers
-  // ─────────────────────────────────────────
+    on<_SyncArrival>((event, emit) {
+      emit(NavigationArrived(event.destinationName));
+    });
 
-  void _handleRerouteDecision(RerouteDecision decision, Emitter<NavigationState> emit) {
-    if (state is! NavigationActive) return;
-    final currentState = state as NavigationActive;
+    on<_SyncError>((event, emit) {
+      emit(NavigationError(event.message));
+    });
 
-    switch (decision) {
-      case RerouteNeeded(:final newPath, :final description):
-        emit(NavigationActive(
-          path: newPath,
-          graph: currentState.graph,
-          remainingDistance: newPath.totalDistance,
-          estimatedTimeSeconds: newPath.estimatedTimeSeconds,
-          currentInstruction: description,
+    on<_SyncPositionUpdate>((event, emit) {
+      final currentState = state;
+      if (currentState is NavigationPathLoaded) {
+        emit(currentState.copyWith(
+          remainingDistance: event.remainingDistance,
+          currentSegmentIndex: event.currentSegmentIndex,
+          instruction: event.instruction,
+          isOffPath: false,
         ));
-      case RerouteFailed(:final message):
-        emit(NavigationError(message));
-      default:
-        break;
-    }
-  }
-
-  void _startEdgeWatcher(String buildingId) {
-    _edgeSubscription?.cancel();
-    _edgeSubscription = _watchEdgesUseCase.execute(buildingId).listen((update) {
-      if (update.newStatus == EdgeStatus.active) {
-        add(EdgeRestored(update.edgeId));
-      } else {
-        add(EdgeBlocked(update.edgeId));
       }
     });
+
+    on<_SyncOffPathWarning>((event, emit) {
+      final currentState = state;
+      if (currentState is NavigationPathLoaded) {
+        emit(currentState.copyWith(isOffPath: true));
+      }
+    });
+
+    // ── Listen to controller's async event stream ──
+    _controllerSub = controller.events.listen(_onControllerEvent);
   }
 
-  void _cleanup() {
-    _edgeSubscription?.cancel();
-    _rerouteSubscription?.cancel();
-    _orchestrator?.dispose();
-    _orchestrator = null;
-    _currentBuildingId = null;
-    _navigationStartTime = null;
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EVENT HANDLERS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Handle: user's starting position identified.
+  void _onSetStartNode(SetStartNode event, Emitter<NavigationBlocState> emit) {
+    controller.setStartNode(event.nodeId);
+    // Stay in current state — waiting for destination
   }
+
+  /// Handle: user selected a destination → compute path.
+  void _onSetDestination(SetDestination event, Emitter<NavigationBlocState> emit) {
+    controller.setDestination(event.nodeId);
+
+    // Emit loading state
+    emit(NavigationLoading(event.nodeId));
+
+    // Compute path
+    final navPath = controller.computePath();
+
+    if (navPath == null) {
+      // Error was already emitted by controller via event stream
+      emit(NavigationError('No path found to destination.'));
+      return;
+    }
+
+    // Extract node IDs for the simple List<String> path
+    final pathIds = navPath.nodes.map((n) => n.id).toList();
+    _lastAlgorithm = controller.state == NavigationState.navigating ? 'A*' : 'Dijkstra';
+
+    emit(NavigationPathLoaded(
+      path: pathIds,
+      navPath: navPath,
+      algorithm: _lastAlgorithm,
+    ));
+  }
+
+  /// Handle: position update during active navigation.
+  void _onUpdatePosition(UpdatePosition event, Emitter<NavigationBlocState> emit) {
+    controller.updatePosition(event.position);
+
+    // The controller emits events via stream → handled in _onControllerEvent.
+    // But we also update state directly for immediate progress tracking:
+    final currentState = state;
+    if (currentState is NavigationPathLoaded && controller.activePath != null) {
+      final path = controller.activePath!;
+      final projection = path.nearestPoint(event.position);
+
+      emit(currentState.copyWith(
+        remainingDistance: path.remainingDistance(projection.segmentIndex),
+        currentSegmentIndex: projection.segmentIndex,
+        isOffPath: projection.distance > controller.offPathThreshold,
+      ));
+    }
+  }
+
+  /// Handle: edge blocked from Firebase.
+  void _onEdgeBlocked(EdgeBlocked event, Emitter<NavigationBlocState> emit) {
+    controller.onEdgeBlocked(event.edgeId);
+    // Reroute is triggered automatically by controller if path is affected.
+    // UI update happens via _onControllerEvent.
+  }
+
+  /// Handle: edge restored.
+  void _onEdgeRestored(EdgeRestored event, Emitter<NavigationBlocState> emit) {
+    controller.onEdgeRestored(event.edgeId);
+  }
+
+  /// Handle: user tapped "Reroute".
+  void _onRequestReroute(RequestReroute event, Emitter<NavigationBlocState> emit) {
+    final currentState = state;
+    if (currentState is NavigationPathLoaded) {
+      emit(currentState.copyWith(isRerouting: true));
+    }
+    controller.triggerReroute(RerouteReason.userRequested);
+  }
+
+  /// Handle: floor change detected.
+  void _onFloorChanged(FloorChanged event, Emitter<NavigationBlocState> emit) {
+    controller.onFloorChanged(event.newFloor);
+  }
+
+  /// Handle: user stops navigation.
+  void _onStopNavigation(StopNavigation event, Emitter<NavigationBlocState> emit) {
+    controller.stopNavigation();
+    emit(NavigationInitial());
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTROLLER EVENT LISTENER
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// React to async events from [NavigationController].
+  ///
+  /// These events arrive via the controller's broadcast stream and
+  /// represent state changes triggered by position updates, edge
+  /// blocking, or rerouting — not directly by user events.
+  void _onControllerEvent(NavigationEvent event) {
+    switch (event) {
+      case PathComputed(:final path, :final algorithm, :final computeTimeMs):
+        _lastAlgorithm = algorithm;
+        add(_SyncPathLoaded(path: path, algorithm: algorithm, computeTimeMs: computeTimeMs));
+
+      case PathRerouted(:final newPath, :final reason, :final description):
+        add(_SyncPathRerouted(newPath: newPath, reason: reason, description: description));
+
+      case ArrivalDetected(:final destination):
+        add(_SyncArrival(destinationName: destination.displayName));
+
+      case NavigationFailed(:final message):
+        add(_SyncError(message: message));
+
+      case PositionUpdated(:final remainingDistance, :final currentSegmentIndex, :final nextInstruction):
+        add(_SyncPositionUpdate(
+          remainingDistance: remainingDistance,
+          currentSegmentIndex: currentSegmentIndex,
+          instruction: nextInstruction,
+        ));
+
+      case OffPathWarning(:final distanceToPath, :final offPathDuration, :final timeUntilReroute):
+        add(_SyncOffPathWarning(distanceToPath: distanceToPath));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CLEANUP
+  // ═══════════════════════════════════════════════════════════════════════════
 
   @override
   Future<void> close() {
-    _cleanup();
+    _controllerSub?.cancel();
+    controller.dispose();
     return super.close();
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERNAL SYNC EVENTS (controller → bloc bridge)
+// ─────────────────────────────────────────────────────────────────────────────
+// These events are dispatched internally to translate controller stream
+// events into bloc state transitions. They are NOT part of the public API.
+
+class _SyncPathLoaded extends NavigationBlocEvent {
+  final NavPath path;
+  final String algorithm;
+  final int computeTimeMs;
+  _SyncPathLoaded({required this.path, required this.algorithm, required this.computeTimeMs});
+}
+
+class _SyncPathRerouted extends NavigationBlocEvent {
+  final NavPath newPath;
+  final RerouteReason reason;
+  final String description;
+  _SyncPathRerouted({required this.newPath, required this.reason, required this.description});
+}
+
+class _SyncArrival extends NavigationBlocEvent {
+  final String destinationName;
+  _SyncArrival({required this.destinationName});
+}
+
+class _SyncError extends NavigationBlocEvent {
+  final String message;
+  _SyncError({required this.message});
+}
+
+class _SyncPositionUpdate extends NavigationBlocEvent {
+  final double remainingDistance;
+  final int currentSegmentIndex;
+  final String? instruction;
+  _SyncPositionUpdate({required this.remainingDistance, required this.currentSegmentIndex, this.instruction});
+}
+
+class _SyncOffPathWarning extends NavigationBlocEvent {
+  final double distanceToPath;
+  _SyncOffPathWarning({required this.distanceToPath});
+}
+
+
