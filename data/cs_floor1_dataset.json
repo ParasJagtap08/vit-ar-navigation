@@ -1,0 +1,186 @@
+{
+  "building": {
+    "id": "cs",
+    "name": "Computer Science Building",
+    "code": "CS",
+    "floors": 4,
+    "graph_version": 1,
+    "campus_offset": {"x": 100.0, "y": 0.0, "z": 50.0}
+  },
+  "nodes": [
+    {
+      "id": "CS-ENT-1F",
+      "x": 0.0, "y": 0.0, "z": 15.0,
+      "floor": 1, "building": "cs",
+      "type": "entrance",
+      "display_name": "CS Main Entrance",
+      "metadata": {"direction": "south"}
+    },
+    {
+      "id": "CS-CORR-1F-01",
+      "x": 5.0, "y": 0.0, "z": 15.0,
+      "floor": 1, "building": "cs",
+      "type": "corridor",
+      "display_name": "Ground Corridor A",
+      "metadata": {"width_meters": 3.0}
+    },
+    {
+      "id": "CS-CORR-1F-02",
+      "x": 15.0, "y": 0.0, "z": 15.0,
+      "floor": 1, "building": "cs",
+      "type": "junction",
+      "display_name": "T-Junction Central",
+      "metadata": {"width_meters": 3.5}
+    },
+    {
+      "id": "CS-CORR-1F-03",
+      "x": 25.0, "y": 0.0, "z": 15.0,
+      "floor": 1, "building": "cs",
+      "type": "corridor",
+      "display_name": "Ground Corridor B",
+      "metadata": {"width_meters": 3.0}
+    },
+    {
+      "id": "CS-CORR-1F-N01",
+      "x": 15.0, "y": 0.0, "z": 25.0,
+      "floor": 1, "building": "cs",
+      "type": "corridor",
+      "display_name": "North Wing Corridor",
+      "metadata": {"width_meters": 2.5}
+    },
+    {
+      "id": "CS-101",
+      "x": 5.0, "y": 0.0, "z": 20.0,
+      "floor": 1, "building": "cs",
+      "type": "room",
+      "display_name": "Room CS-101",
+      "metadata": {"capacity": 60, "department": "CSE", "has_projector": true}
+    },
+    {
+      "id": "CS-102",
+      "x": 5.0, "y": 0.0, "z": 10.0,
+      "floor": 1, "building": "cs",
+      "type": "room",
+      "display_name": "Room CS-102",
+      "metadata": {"capacity": 45, "department": "CSE", "has_projector": true}
+    },
+    {
+      "id": "CS-103",
+      "x": 25.0, "y": 0.0, "z": 20.0,
+      "floor": 1, "building": "cs",
+      "type": "room",
+      "display_name": "Room CS-103",
+      "metadata": {"capacity": 55, "department": "CSE"}
+    },
+    {
+      "id": "CS-104",
+      "x": 25.0, "y": 0.0, "z": 10.0,
+      "floor": 1, "building": "cs",
+      "type": "room",
+      "display_name": "Room CS-104",
+      "metadata": {"capacity": 40, "department": "CSE"}
+    },
+    {
+      "id": "CS-LAB-101",
+      "x": 15.0, "y": 0.0, "z": 30.0,
+      "floor": 1, "building": "cs",
+      "type": "lab",
+      "display_name": "Programming Lab 1",
+      "metadata": {"capacity": 35, "systems": 30, "department": "CSE"}
+    },
+    {
+      "id": "CS-LAB-102",
+      "x": 25.0, "y": 0.0, "z": 25.0,
+      "floor": 1, "building": "cs",
+      "type": "lab",
+      "display_name": "Networks Lab",
+      "metadata": {"capacity": 30, "systems": 25, "department": "CSE"}
+    },
+    {
+      "id": "CS-WC-1F",
+      "x": 30.0, "y": 0.0, "z": 15.0,
+      "floor": 1, "building": "cs",
+      "type": "washroom",
+      "display_name": "Ground Floor Washroom",
+      "metadata": {"gender": "unisex"}
+    },
+    {
+      "id": "CS-STAIRS-1F",
+      "x": 15.0, "y": 0.0, "z": 5.0,
+      "floor": 1, "building": "cs",
+      "type": "stairs",
+      "display_name": "Central Staircase (Floor 1)",
+      "metadata": {"connects_floors": [1, 2, 3, 4]}
+    },
+    {
+      "id": "CS-LIFT-1F",
+      "x": 20.0, "y": 0.0, "z": 5.0,
+      "floor": 1, "building": "cs",
+      "type": "lift",
+      "display_name": "Elevator (Floor 1)",
+      "metadata": {"connects_floors": [1, 2, 3, 4], "wheelchair_accessible": true}
+    },
+    {
+      "id": "CS-HOD-1F",
+      "x": 30.0, "y": 0.0, "z": 25.0,
+      "floor": 1, "building": "cs",
+      "type": "office",
+      "display_name": "HOD Office (CSE)",
+      "metadata": {"occupant": "Dr. Sharma", "department": "CSE"}
+    }
+  ],
+  "edges": [
+    {"id": "e01", "from_node": "CS-ENT-1F", "to_node": "CS-CORR-1F-01", "weight": 5.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e02", "from_node": "CS-CORR-1F-01", "to_node": "CS-CORR-1F-02", "weight": 10.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e03", "from_node": "CS-CORR-1F-02", "to_node": "CS-CORR-1F-03", "weight": 10.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e04", "from_node": "CS-CORR-1F-02", "to_node": "CS-CORR-1F-N01", "weight": 10.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e05", "from_node": "CS-CORR-1F-01", "to_node": "CS-101", "weight": 5.1, "type": "door", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e06", "from_node": "CS-CORR-1F-01", "to_node": "CS-102", "weight": 5.1, "type": "door", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e07", "from_node": "CS-CORR-1F-03", "to_node": "CS-103", "weight": 5.1, "type": "door", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e08", "from_node": "CS-CORR-1F-03", "to_node": "CS-104", "weight": 5.1, "type": "door", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e09", "from_node": "CS-CORR-1F-N01", "to_node": "CS-LAB-101", "weight": 5.1, "type": "door", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e10", "from_node": "CS-CORR-1F-03", "to_node": "CS-LAB-102", "weight": 10.2, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e11", "from_node": "CS-CORR-1F-03", "to_node": "CS-WC-1F", "weight": 5.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e12", "from_node": "CS-CORR-1F-02", "to_node": "CS-STAIRS-1F", "weight": 10.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e13", "from_node": "CS-STAIRS-1F", "to_node": "CS-LIFT-1F", "weight": 5.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e14", "from_node": "CS-CORR-1F-N01", "to_node": "CS-LAB-102", "weight": 10.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e15", "from_node": "CS-LAB-102", "to_node": "CS-HOD-1F", "weight": 5.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e16", "from_node": "CS-CORR-1F-03", "to_node": "CS-HOD-1F", "weight": 11.2, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e17", "from_node": "CS-WC-1F", "to_node": "CS-HOD-1F", "weight": 10.0, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true},
+    {"id": "e18", "from_node": "CS-STAIRS-1F", "to_node": "CS-STAIRS-2F", "weight": 8.0, "type": "stairs", "bidirectional": true, "status": "active", "wheelchair_accessible": false, "metadata": {"floor_transition": true, "from_floor": 1, "to_floor": 2}},
+    {"id": "e19", "from_node": "CS-LIFT-1F", "to_node": "CS-LIFT-2F", "weight": 3.0, "type": "lift", "bidirectional": true, "status": "active", "wheelchair_accessible": true, "metadata": {"floor_transition": true, "from_floor": 1, "to_floor": 2}},
+    {"id": "e20", "from_node": "CS-ENT-1F", "to_node": "CS-CORR-1F-02", "weight": 15.8, "type": "corridor", "bidirectional": true, "status": "active", "wheelchair_accessible": true, "metadata": {"congestion_level": 0.6, "notes": "Shortcut through lobby, often crowded"}}
+  ],
+  "qr_anchors": [
+    {
+      "id": "CS-QR-001",
+      "mapped_node": "CS-ENT-1F",
+      "building": "cs",
+      "floor": 1,
+      "offset": {"x": 0.0, "y": 1.5, "z": 0.0},
+      "orientation": {"yaw": 0.0},
+      "position": {"x": 0.0, "y": 1.5, "z": 15.0},
+      "metadata": {"location_description": "Left wall next to entrance doors", "qr_size_cm": 20}
+    },
+    {
+      "id": "CS-QR-002",
+      "mapped_node": "CS-CORR-1F-02",
+      "building": "cs",
+      "floor": 1,
+      "offset": {"x": 0.0, "y": 1.5, "z": 0.0},
+      "orientation": {"yaw": 90.0},
+      "position": {"x": 15.0, "y": 1.5, "z": 15.0},
+      "metadata": {"location_description": "North wall at T-junction", "qr_size_cm": 20}
+    },
+    {
+      "id": "CS-QR-003",
+      "mapped_node": "CS-CORR-1F-03",
+      "building": "cs",
+      "floor": 1,
+      "offset": {"x": 0.0, "y": 1.5, "z": 0.0},
+      "orientation": {"yaw": 180.0},
+      "position": {"x": 25.0, "y": 1.5, "z": 15.0},
+      "metadata": {"location_description": "Right wall near Room CS-103", "qr_size_cm": 20}
+    }
+  ]
+}
