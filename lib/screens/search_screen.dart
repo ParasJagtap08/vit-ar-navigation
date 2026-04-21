@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/models.dart';
 import '../providers/navigation_provider.dart';
-import 'ar_navigation_screen.dart';
+import 'live_map_screen.dart';
 
 class SearchScreen extends StatefulWidget {
   final String? buildingId;
@@ -262,12 +262,10 @@ class _SearchScreenState extends State<SearchScreen> {
       nav.computePath();
       nav.clearSearch();
       
-      // Go back to the screen before the first search screen, then push nav
       Navigator.of(context).popUntil((route) => route.isFirst);
       Navigator.push(
         context,
-        // We will replace this with ARNavigationScreen later
-        MaterialPageRoute(builder: (_) => const ARNavigationScreen()),
+        MaterialPageRoute(builder: (_) => const LiveMapScreen()),
       );
     } else {
       nav.setDestination(node.id);
@@ -291,7 +289,7 @@ class _SearchScreenState extends State<SearchScreen> {
         nav.clearSearch();
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (_) => const ARNavigationScreen()),
+          MaterialPageRoute(builder: (_) => const LiveMapScreen()),
         );
       }
     }

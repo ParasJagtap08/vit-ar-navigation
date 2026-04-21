@@ -6,6 +6,7 @@ import '../providers/navigation_provider.dart';
 import '../widgets/building_card.dart';
 import 'search_screen.dart';
 import 'ar_navigation_screen.dart';
+import 'live_map_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -20,6 +21,7 @@ class HomeScreen extends StatelessWidget {
           slivers: [
             _buildAppBar(context),
             _buildStatsBanner(context),
+            _buildNavigationCard(context),
             _buildQuickActions(context),
             _buildSectionTitle('Campus Buildings'),
             _buildBuildingGrid(context),
@@ -166,6 +168,103 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
+  /// Prominent hero card to launch the GPS map navigation.
+  Widget _buildNavigationCard(BuildContext context) {
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () {
+              final nav = context.read<NavigationProvider>();
+              if (nav.activePath != null) {
+                // Already have a path — go directly to map
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+                );
+              } else {
+                // Need to select start + destination first
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const SearchScreen()),
+                );
+              }
+            },
+            borderRadius: BorderRadius.circular(18),
+            child: Container(
+              padding: const EdgeInsets.all(18),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF00695C), Color(0xFF004D40)],
+                ),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: const Color(0xFF00BCD4).withOpacity(0.3),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF00BCD4).withOpacity(0.1),
+                    blurRadius: 16,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 50,
+                    height: 50,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00BCD4).withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: const Icon(
+                      Icons.navigation_rounded,
+                      color: Color(0xFF00E5FF),
+                      size: 28,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Start Navigation',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 17,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'GPS Map • Live Tracking • AR View',
+                          style: TextStyle(
+                            color: const Color(0xFF00E5FF).withOpacity(0.7),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(
+                    Icons.arrow_forward_ios_rounded,
+                    color: Color(0xFF00E5FF),
+                    size: 18,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildQuickActions(BuildContext context) {
     return SliverToBoxAdapter(
       child: Padding(
@@ -271,7 +370,7 @@ class HomeScreen extends StatelessWidget {
     if (found) {
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => const ARNavigationScreen()), // Go to AR
+        MaterialPageRoute(builder: (_) => const LiveMapScreen()),
       );
     }
   }
