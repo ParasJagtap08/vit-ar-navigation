@@ -79,15 +79,25 @@ class GpsService {
 
   /// Get the current GPS position as a [LatLng].
   ///
-  /// Returns `null` if GPS is unavailable.
+  /// First tries the cached last-known position (instant), then
+  /// falls back to a fresh GPS fix with a 5-second timeout.
+  /// Returns `null` if GPS is unavailable or times out.
   Future<LatLng?> getCurrentPosition() async {
     if (!_available) return null;
 
     try {
+      // 1. Try last known position first (instant, no GPS wait)
+      final lastKnown = await Geolocator.getLastKnownPosition();
+      if (lastKnown != null) {
+        debugPrint('GpsService: Using last known position.');
+        return LatLng(lastKnown.latitude, lastKnown.longitude);
+      }
+
+      // 2. Fresh GPS fix with short timeout
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 10),
+          timeLimit: Duration(seconds: 5),
         ),
       );
       return LatLng(position.latitude, position.longitude);

@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/campus_data.dart';
+import '../core/campus_proximity_service.dart';
 import '../core/models.dart';
 import '../providers/navigation_provider.dart';
 import '../widgets/building_card.dart';
 import 'search_screen.dart';
-import 'ar_navigation_screen.dart';
 import 'live_map_screen.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -49,7 +49,7 @@ class HomeScreen extends StatelessWidget {
               'VIT Campus',
               style: TextStyle(
                 fontWeight: FontWeight.w800,
-                fontSize: 22,
+                fontSize: 20,
                 color: Colors.white,
                 letterSpacing: -0.5,
               ),
@@ -58,7 +58,7 @@ class HomeScreen extends StatelessWidget {
               'Navigator',
               style: TextStyle(
                 fontWeight: FontWeight.w300,
-                fontSize: 14,
+                fontSize: 13,
                 color: const Color(0xFF00BCD4).withOpacity(0.9),
                 letterSpacing: 2,
               ),
@@ -177,20 +177,23 @@ class HomeScreen extends StatelessWidget {
           color: Colors.transparent,
           child: InkWell(
             onTap: () {
-              final nav = context.read<NavigationProvider>();
-              if (nav.activePath != null) {
-                // Already have a path — go directly to map
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const LiveMapScreen()),
-                );
-              } else {
-                // Need to select start + destination first
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const SearchScreen()),
-                );
-              }
+              checkUserDistanceAndNavigate(
+                context: context,
+                onNearCampus: () {
+                  final nav = context.read<NavigationProvider>();
+                  if (nav.activePath != null) {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+                    );
+                  } else {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const SearchScreen()),
+                    );
+                  }
+                },
+              );
             },
             borderRadius: BorderRadius.circular(18),
             child: Container(
@@ -368,9 +371,14 @@ class HomeScreen extends StatelessWidget {
     
     final found = nav.findNearestAmenity(type);
     if (found) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+      checkUserDistanceAndNavigate(
+        context: context,
+        onNearCampus: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+          );
+        },
       );
     }
   }

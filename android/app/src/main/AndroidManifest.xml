@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ✅ ADD LOCATION PERMISSIONS HERE -->
+    <!-- ✅ LOCATION PERMISSIONS -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
@@ -8,7 +8,7 @@
         android:label="vit_ar_app"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">  <!-- ✅ ADD THIS -->
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
@@ -35,11 +35,27 @@
             android:value="2" />
     </application>
 
+    <!-- ✅ IMPORTANT: ADD THIS FOR GOOGLE MAPS (FIX YOUR ISSUE) -->
     <queries>
+
+        <!-- Existing -->
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+
+        <!-- ✅ ADD THIS -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+
+        <!-- ✅ ADD THIS (for geo fallback) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="geo"/>
+        </intent>
+
     </queries>
 
 </manifest>

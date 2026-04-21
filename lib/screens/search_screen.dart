@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../core/campus_proximity_service.dart';
 import '../core/models.dart';
 import '../providers/navigation_provider.dart';
 import 'live_map_screen.dart';
@@ -261,20 +262,24 @@ class _SearchScreenState extends State<SearchScreen> {
       }
       nav.computePath();
       nav.clearSearch();
-      
+
       Navigator.of(context).popUntil((route) => route.isFirst);
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+      checkUserDistanceAndNavigate(
+        context: context,
+        onNearCampus: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+          );
+        },
       );
     } else {
       nav.setDestination(node.id);
 
       if (nav.startNodeId == null) {
-        // We need to ask for start location. Make sure we clear the current search 
-        // so they don't accidentally pick the same node they just selected.
+        // We need to ask for start location
         nav.clearSearch();
-        
+
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -287,9 +292,14 @@ class _SearchScreenState extends State<SearchScreen> {
       } else {
         nav.computePath();
         nav.clearSearch();
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+        checkUserDistanceAndNavigate(
+          context: context,
+          onNearCampus: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+            );
+          },
         );
       }
     }

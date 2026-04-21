@@ -44,31 +44,31 @@ class GpsAnchor {
 /// Buildings are placed ~80m apart matching the campus_data.dart offsets.
 const Map<String, GpsAnchor> campusGpsAnchors = {
   'cs': GpsAnchor(
-    latitude: 18.4529,
-    longitude: 73.8674,
+    latitude: 18.4637,
+    longitude: 73.8682,
     bearingDeg: 90.0,
   ),
   'aiml': GpsAnchor(
-    latitude: 18.4529,
-    longitude: 73.86815, // ~80m east
+    latitude: 18.4637,
+    longitude: 73.8690, // ~80m east
     bearingDeg: 90.0,
   ),
   'aids': GpsAnchor(
-    latitude: 18.45218, // ~80m south
-    longitude: 73.8674,
+    latitude: 18.4630, // ~80m south
+    longitude: 73.8682,
     bearingDeg: 90.0,
   ),
   'ai': GpsAnchor(
-    latitude: 18.45218,
-    longitude: 73.86815,
+    latitude: 18.4630,
+    longitude: 73.8690,
     bearingDeg: 90.0,
   ),
 };
 
 /// Fallback anchor if building is unknown.
 const _defaultAnchor = GpsAnchor(
-  latitude: 18.4529,
-  longitude: 73.8674,
+  latitude: 18.4637,
+  longitude: 73.8682,
 );
 
 // ─────────────────────────────────────────────────────────────
