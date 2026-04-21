@@ -6,7 +6,10 @@
 /// - Compass-driven map rotation (optional)
 /// - Route polyline with animated styling
 /// - Dynamic connector line (user → nearest path node)
-/// - HUD with direction arrow, distance, live ETA
+/// - Turn-by-turn instruction banner
+/// - Live stats: distance, ETA, steps walked
+/// - Pedometer distance tracking
+/// - Auto node-switching based on proximity
 /// - Simulate / Reroute / Stop controls
 
 import 'dart:async';
@@ -62,16 +65,13 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     _compassSub = FlutterCompass.events?.listen((event) {
       final heading = event.heading;
       if (heading != null && mounted) {
-        // Smooth heading with low-pass filter
         final diff = heading - _smoothHeading;
-        // Normalize to [-180, 180]
         final normalizedDiff = (diff + 540) % 360 - 180;
         _smoothHeading += normalizedDiff * 0.15;
         _smoothHeading = _smoothHeading % 360;
 
         context.read<NavigationProvider>().updateDeviceHeading(_smoothHeading);
 
-        // Rotate map to follow heading
         if (_rotateMap && _followUser && _isNavigationStarted) {
           _mapController.rotate(-_smoothHeading);
         }
@@ -166,10 +166,19 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                 child: _buildTopBar(context, nav),
               ),
 
+              // ─── Turn instruction banner ───
+              if (_isNavigationStarted)
+                Positioned(
+                  top: MediaQuery.of(context).padding.top + 56,
+                  left: 16,
+                  right: 16,
+                  child: _buildInstructionBanner(nav),
+                ),
+
               // ─── Floating controls ───
               Positioned(
                 right: 16,
-                bottom: _isNavigationStarted ? 320 : 200,
+                bottom: _isNavigationStarted ? 340 : 200,
                 child: _buildFloatingControls(nav),
               ),
 
@@ -183,21 +192,84 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                     : _buildStartPanel(nav),
               ),
 
-              // ─── Live stats strip ───
-              if (_isNavigationStarted && nav.isLiveTracking)
-                Positioned(
-                  top: MediaQuery.of(context).padding.top + 60,
-                  left: 16,
-                  right: 16,
-                  child: _buildLiveStatsStrip(nav),
-                ),
-
               // ─── Arrival overlay ───
               if (nav.hasArrived)
                 Positioned.fill(child: _buildArrivalOverlay(nav)),
             ],
           );
         },
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // INSTRUCTION BANNER (Feature 2 UI)
+  // ═══════════════════════════════════════════════════════════════
+
+  Widget _buildInstructionBanner(NavigationProvider nav) {
+    final instruction = nav.currentInstruction;
+    final nextTurn = nav.nextTurnInstruction;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A237E).withOpacity(0.95),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF4285F4).withOpacity(0.3)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0D47A1).withOpacity(0.4),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Main instruction
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4285F4).withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.navigation_rounded,
+                    color: Color(0xFF4285F4), size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  instruction,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          // Next turn preview
+          if (nextTurn.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              nextTurn,
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -211,7 +283,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     final destPos = nav.destinationLatLng;
     final pathPoints = nav.pathLatLngs;
 
-    // Default center
     final center = userPos ??
         destPos ??
         const LatLng(18.4637, 73.8682);
@@ -230,7 +301,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
         },
       ),
       children: [
-        // OSM tile layer
         TileLayer(
           urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
           userAgentPackageName: 'com.vit.campus.navigator',
@@ -241,13 +311,11 @@ class _LiveMapScreenState extends State<LiveMapScreen>
         if (pathPoints.length >= 2)
           PolylineLayer(
             polylines: [
-              // Shadow
               Polyline(
                 points: pathPoints,
                 strokeWidth: 10,
                 color: const Color(0xFF1565C0).withOpacity(0.25),
               ),
-              // Main route — Google Maps blue
               Polyline(
                 points: pathPoints,
                 strokeWidth: 6,
@@ -258,7 +326,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
             ],
           ),
 
-        // Connector line: user → nearest path point
+        // Connector: user → nearest path node
         if (userPos != null && pathPoints.length >= 2)
           PolylineLayer(
             polylines: [
@@ -272,9 +340,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
 
         // Path node markers
         if (pathPoints.length >= 2)
-          MarkerLayer(
-            markers: _buildPathNodeMarkers(nav),
-          ),
+          MarkerLayer(markers: _buildPathNodeMarkers(nav)),
 
         // Destination marker
         if (destPos != null)
@@ -310,7 +376,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
             ],
           ),
 
-        // User position (animated blue dot with heading)
+        // User position
         if (userPos != null)
           MarkerLayer(
             markers: [
@@ -326,7 +392,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     );
   }
 
-  /// Find the nearest point on the path to the user
   LatLng _nearestPathPoint(LatLng userPos, List<LatLng> pathPoints) {
     double minDist = double.infinity;
     LatLng nearest = pathPoints.first;
@@ -340,7 +405,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     return nearest;
   }
 
-  /// Build small dot markers for each node along the path
   List<Marker> _buildPathNodeMarkers(NavigationProvider nav) {
     final pathLatLngs = nav.pathLatLngs;
     if (pathLatLngs.length <= 2) return [];
@@ -381,7 +445,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     });
   }
 
-  /// Animated blue dot with heading direction cone
   Widget _buildUserMarker(NavigationProvider nav) {
     return AnimatedBuilder(
       animation: _pulseController,
@@ -392,7 +455,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
         return Stack(
           alignment: Alignment.center,
           children: [
-            // Heading cone (direction fan)
+            // Heading cone
             if (_isNavigationStarted)
               Transform.rotate(
                 angle: _smoothHeading * pi / 180.0,
@@ -449,7 +512,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     );
   }
 
-  /// Destination pin marker
   Widget _buildDestinationMarker(NavigationProvider nav) {
     final destName = nav.destNode?.displayName ?? 'Destination';
     return Column(
@@ -486,81 +548,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
         ),
       ],
     );
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // LIVE STATS STRIP (distance, ETA, speed — like Google Maps)
-  // ═══════════════════════════════════════════════════════════════
-
-  Widget _buildLiveStatsStrip(NavigationProvider nav) {
-    final distText = nav.formattedDistance;
-    final eta = _calculateETA(nav.distanceToDest);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF121830).withOpacity(0.92),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFF4285F4).withOpacity(0.2)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.4),
-            blurRadius: 10,
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _liveStatItem(Icons.straighten_rounded, distText, 'Distance'),
-          Container(width: 1, height: 30, color: Colors.white12),
-          _liveStatItem(Icons.timer_rounded, eta, 'ETA'),
-          Container(width: 1, height: 30, color: Colors.white12),
-          _liveStatItem(Icons.explore_rounded, nav.directionToDestination, 'Direction'),
-        ],
-      ),
-    );
-  }
-
-  Widget _liveStatItem(IconData icon, String value, String label) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 14, color: const Color(0xFF4285F4)),
-            const SizedBox(width: 4),
-            Text(
-              value,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 15,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
-        Text(
-          label,
-          style: TextStyle(
-            color: Colors.white.withOpacity(0.4),
-            fontSize: 10,
-          ),
-        ),
-      ],
-    );
-  }
-
-  String _calculateETA(double distanceMeters) {
-    const walkingSpeedMps = 1.2; // ~4.3 km/h walking speed
-    final seconds = distanceMeters / walkingSpeedMps;
-    if (seconds < 60) return '${seconds.round()}s';
-    final minutes = (seconds / 60).ceil();
-    if (minutes < 60) return '${minutes}min';
-    final hours = minutes ~/ 60;
-    final mins = minutes % 60;
-    return '${hours}h ${mins}m';
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -662,7 +649,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // AR View
         if (nav.isNavigating)
           _buildFab(
             icon: Icons.view_in_ar_rounded,
@@ -676,8 +662,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
             },
           ),
         const SizedBox(height: 10),
-
-        // Map rotation toggle
         _buildFab(
           icon: _rotateMap ? Icons.compass_calibration_rounded : Icons.explore_rounded,
           tooltip: _rotateMap ? 'North up' : 'Rotate map',
@@ -685,15 +669,11 @@ class _LiveMapScreenState extends State<LiveMapScreen>
           onTap: () {
             setState(() {
               _rotateMap = !_rotateMap;
-              if (!_rotateMap) {
-                _mapController.rotate(0);
-              }
+              if (!_rotateMap) _mapController.rotate(0);
             });
           },
         ),
         const SizedBox(height: 10),
-
-        // Re-center
         _buildFab(
           icon: _followUser
               ? Icons.my_location_rounded
@@ -703,8 +683,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
           onTap: _centerOnUser,
         ),
         const SizedBox(height: 10),
-
-        // Fit path
         if (nav.pathLatLngs.length >= 2)
           _buildFab(
             icon: Icons.zoom_out_map_rounded,
@@ -791,8 +769,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                 ),
               ),
               const SizedBox(height: 16),
-
-              // Route summary
               if (nav.activePath != null) ...[
                 Row(
                   children: [
@@ -838,8 +814,6 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                 ),
                 const SizedBox(height: 16),
               ],
-
-              // Start button
               SizedBox(
                 width: double.infinity,
                 height: 52,
@@ -915,39 +889,41 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
 
-              // Direction arrow + instruction
+              // Direction arrow + stats
               Row(
                 children: [
                   DirectionArrow(
                     angleRadians: nav.relativeArrowAngle,
                     cardinalDirection: nav.directionToDestination,
-                    size: 80,
+                    size: 72,
                   ),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 14),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          nav.currentInstruction,
-                          style: const TextStyle(
-                            color: Color(0xFF4285F4),
-                            fontWeight: FontWeight.w700,
-                            fontSize: 15,
-                          ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 8),
+                        // Distance + ETA
                         Row(
                           children: [
-                            _infoChip(Icons.straighten_rounded,
-                                nav.formattedDistance),
-                            const SizedBox(width: 12),
-                            _infoChip(Icons.timer_outlined,
-                                _calculateETA(nav.distanceToDest)),
+                            _statBadge(Icons.straighten_rounded,
+                                nav.formattedDistance, const Color(0xFF4285F4)),
+                            const SizedBox(width: 8),
+                            _statBadge(Icons.timer_rounded,
+                                _calculateETA(nav.distanceToDest), const Color(0xFFFFA726)),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        // Walked distance + steps (Feature 4 UI)
+                        Row(
+                          children: [
+                            _statBadge(Icons.directions_walk_rounded,
+                                nav.formattedWalkedDistance, const Color(0xFF4CAF50)),
+                            const SizedBox(width: 8),
+                            _statBadge(Icons.do_not_step_rounded,
+                                '${nav.stepsWalked} steps',
+                                const Color(0xFF9C27B0)),
                           ],
                         ),
                       ],
@@ -955,7 +931,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
 
               // Progress bar
               ClipRRect(
@@ -968,7 +944,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                       const AlwaysStoppedAnimation(Color(0xFF4285F4)),
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
 
               // Action buttons
               Row(
@@ -1056,6 +1032,15 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                   fontSize: 16,
                 ),
               ),
+              const SizedBox(height: 12),
+              // Show walked stats
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _arrivalStat('🚶', '${nav.stepsWalked}', 'Steps'),
+                  _arrivalStat('📏', nav.formattedWalkedDistance, 'Walked'),
+                ],
+              ),
               const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
@@ -1083,9 +1068,69 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     );
   }
 
+  Widget _arrivalStat(String emoji, String value, String label) {
+    return Column(
+      children: [
+        Text(emoji, style: const TextStyle(fontSize: 24)),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.4),
+            fontSize: 11,
+          ),
+        ),
+      ],
+    );
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // HELPERS
   // ═══════════════════════════════════════════════════════════════
+
+  String _calculateETA(double distanceMeters) {
+    const walkingSpeedMps = 1.2;
+    final seconds = distanceMeters / walkingSpeedMps;
+    if (seconds < 60) return '${seconds.round()}s';
+    final minutes = (seconds / 60).ceil();
+    if (minutes < 60) return '${minutes}min';
+    final hours = minutes ~/ 60;
+    final mins = minutes % 60;
+    return '${hours}h ${mins}m';
+  }
+
+  Widget _statBadge(IconData icon, String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.2)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _routeEndpoint({
     required IconData icon,
@@ -1191,7 +1236,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HEADING CONE PAINTER — shows which direction user is facing
+// HEADING CONE PAINTER
 // ═══════════════════════════════════════════════════════════════
 
 class _HeadingConePainter extends CustomPainter {
@@ -1200,7 +1245,7 @@ class _HeadingConePainter extends CustomPainter {
     final cx = size.width / 2;
     final cy = size.height / 2;
     final radius = size.width * 0.42;
-    const spread = 0.4; // cone angle in radians (~23°)
+    const spread = 0.4;
 
     final path = ui.Path()
       ..moveTo(cx, cy)

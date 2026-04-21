@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:pedometer/pedometer.dart';
 import '../core/models.dart';
 import '../core/graph.dart';
 import '../core/campus_data.dart';
@@ -10,8 +11,9 @@ import '../core/gps_service.dart';
 
 /// Central state manager for the entire navigation app.
 ///
-/// Manages both the indoor graph-based navigation AND
-/// GPS-based live tracking for the map navigation view.
+/// Manages indoor graph-based navigation AND GPS-based live tracking,
+/// with smooth movement, turn-by-turn instructions, auto node switching,
+/// and pedometer-based distance tracking.
 class NavigationProvider extends ChangeNotifier {
   // ─── Graph ───
   late final NavigationGraph graph;
@@ -42,45 +44,85 @@ class NavigationProvider extends ChangeNotifier {
   // GPS TRACKING STATE
   // ═══════════════════════════════════════════════════════════
 
-  /// Current user GPS position.
   LatLng? _userGpsPosition;
-
-  /// Whether live GPS tracking is active.
   bool _isLiveTracking = false;
-
-  /// Compass bearing FROM user TO destination (degrees, 0=North).
   double _bearingToDest = 0.0;
-
-  /// Distance FROM user TO destination (meters).
   double _distanceToDest = 0.0;
-
-  /// Distance remaining along the path (meters).
   double _remainingPathDistance = 0.0;
-
-  /// Device compass heading (degrees, 0=North).
   double _deviceHeading = 0.0;
-
-  /// GPS stream subscription.
   StreamSubscription<GpsPosition>? _gpsStreamSub;
-
-  /// Whether GPS is available.
   bool _gpsAvailable = false;
-
-  /// Simulation mode index (for emulator testing).
   int _simulationIndex = 0;
 
-  /// Arrival threshold in meters — user is "arrived" within this distance.
+  // ═══════════════════════════════════════════════════════════
+  // FEATURE 1: GPS SMOOTHING
+  // ═══════════════════════════════════════════════════════════
+
+  /// Previous smoothed GPS position for low-pass filter.
+  LatLng? _previousSmoothedPosition;
+
+  /// Smoothing factor: 0 = full smooth (no movement), 1 = no smooth (raw GPS).
+  /// 0.2 gives a nice balance for indoor use.
+  static const double _smoothingAlpha = 0.25;
+
+  /// Apply exponential low-pass filter to reduce GPS jitter.
+  LatLng _smoothPosition(LatLng newPos) {
+    if (_previousSmoothedPosition == null) {
+      _previousSmoothedPosition = newPos;
+      return newPos;
+    }
+
+    final smoothed = LatLng(
+      _previousSmoothedPosition!.latitude +
+          _smoothingAlpha * (newPos.latitude - _previousSmoothedPosition!.latitude),
+      _previousSmoothedPosition!.longitude +
+          _smoothingAlpha * (newPos.longitude - _previousSmoothedPosition!.longitude),
+    );
+
+    _previousSmoothedPosition = smoothed;
+    return smoothed;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // FEATURE 3: AUTO NODE SWITCHING
+  // ═══════════════════════════════════════════════════════════
+
+  /// Arrival threshold — user is "arrived" within this distance (meters).
   static const double _arrivalThreshold = 8.0;
 
-  /// Proximity threshold for segment advancement (meters).
-  static const double _segmentProximity = 10.0;
+  /// Auto-advance threshold — switch to next node when within this (meters).
+  static const double _autoAdvanceThreshold = 5.0;
+
+  // ═══════════════════════════════════════════════════════════
+  // FEATURE 4: PEDOMETER
+  // ═══════════════════════════════════════════════════════════
+
+  /// Step count when navigation started.
+  int _stepCountAtStart = -1;
+
+  /// Current step count from sensor.
+  int _currentStepCount = 0;
+
+  /// Steps walked during this navigation session.
+  int _stepsWalked = 0;
+
+  /// Average step length in meters (configurable).
+  double _stepLength = 0.7;
+
+  /// Distance walked based on pedometer (meters).
+  double _walkedDistance = 0.0;
+
+  /// Whether pedometer is available on this device.
+  bool _pedometerAvailable = false;
+
+  /// Pedometer stream subscription.
+  StreamSubscription<StepCount>? _pedometerSub;
 
   NavigationProvider() {
     graph = buildCampusGraph();
     _initGps();
   }
 
-  /// Initialize GPS service on creation.
   Future<void> _initGps() async {
     _gpsAvailable = await GpsService.instance.initialize();
     notifyListeners();
@@ -133,7 +175,6 @@ class NavigationProvider extends ChangeNotifier {
   bool get gpsAvailable => _gpsAvailable;
   int get simulationIndex => _simulationIndex;
 
-  /// Convert the active path's nodes to GPS coordinates for map display.
   List<LatLng> get pathLatLngs {
     if (_activePath == null) return [];
     return _activePath!.nodes.map((node) {
@@ -141,56 +182,163 @@ class NavigationProvider extends ChangeNotifier {
     }).toList();
   }
 
-  /// The user's current position as LatLng — either GPS or simulated.
   LatLng? get userLatLng => _userGpsPosition;
 
-  /// The destination node converted to GPS.
   LatLng? get destinationLatLng {
     final dest = destNode;
     if (dest == null) return null;
     return localToLatLng(dest.position, dest.building);
   }
 
-  /// The start node converted to GPS.
   LatLng? get startLatLng {
     final start = startNode;
     if (start == null) return null;
     return localToLatLng(start.position, start.building);
   }
 
-  /// Formatted distance to destination.
   String get formattedDistance => formatDistance(_distanceToDest);
-
-  /// Formatted remaining path distance.
   String get formattedRemainingDistance => formatDistance(_remainingPathDistance);
-
-  /// Cardinal direction to destination (N, NE, E, etc.).
   String get directionToDestination => bearingToCardinal(_bearingToDest);
 
-  /// The relative arrow rotation for the direction widget.
-  /// This is the angle between device heading and bearing to destination.
   double get relativeArrowAngle {
     return ((_bearingToDest - _deviceHeading) % 360) * pi / 180.0;
   }
 
-  /// Check if user has arrived at the destination.
   bool get hasArrived => _isNavigating && _distanceToDest < _arrivalThreshold;
 
-  /// Current navigation instruction text.
+  // ═══════════════════════════════════════════════════════════
+  // GETTERS — Pedometer
+  // ═══════════════════════════════════════════════════════════
+
+  int get stepsWalked => _stepsWalked;
+  double get walkedDistance => _walkedDistance;
+  bool get pedometerAvailable => _pedometerAvailable;
+  double get stepLength => _stepLength;
+
+  /// Remaining distance = path total distance (in local units * ~1m each) - walked distance.
+  /// We estimate remaining using GPS distance when walked < path distance.
+  double get estimatedRemainingDistance {
+    if (_activePath == null) return 0;
+    // Use GPS straight-line distance as remaining
+    return _distanceToDest;
+  }
+
+  String get formattedWalkedDistance => formatDistance(_walkedDistance);
+  String get formattedEstimatedRemaining => formatDistance(estimatedRemainingDistance);
+
+  // ═══════════════════════════════════════════════════════════
+  // FEATURE 2: TURN-BY-TURN INSTRUCTIONS
+  // ═══════════════════════════════════════════════════════════
+
+  /// Generate smart turn-by-turn navigation instruction.
   String get currentInstruction {
     if (_activePath == null) return 'Select a destination';
     if (hasArrived) return '🎉 You have arrived!';
 
-    if (_currentSegmentIndex < _activePath!.nodes.length - 1) {
-      final next = _activePath!.nodes[_currentSegmentIndex + 1];
-      if (next.type == NodeType.stairs) return '🚶 Head to the staircase';
-      if (next.type == NodeType.lift) return '🛗 Head to the elevator';
-      if (next.type == NodeType.washroom) return '🚻 Washroom ahead';
-      if (next.type == NodeType.entrance) return '🚪 Head to the entrance';
-      if (next.isDestination) return '📍 ${next.displayName} ahead';
-      return '→ Continue to ${next.displayName}';
+    final nodes = _activePath!.nodes;
+    if (_currentSegmentIndex >= nodes.length - 1) {
+      return '📍 Arriving at ${_activePath!.destination.displayName}';
     }
-    return '📍 Arriving at ${_activePath!.destination.displayName}';
+
+    final currentNode = nodes[_currentSegmentIndex];
+    final nextNode = nodes[_currentSegmentIndex + 1];
+
+    // Check for special node types first
+    if (nextNode.type == NodeType.stairs) return '🚶 Head to the staircase';
+    if (nextNode.type == NodeType.lift) return '🛗 Head to the elevator';
+    if (nextNode.type == NodeType.washroom) return '🚻 Washroom ahead';
+    if (nextNode.type == NodeType.entrance) return '🚪 Head to the entrance';
+
+    // Calculate turn direction
+    final turnInstruction = _getTurnInstruction(currentNode, nextNode);
+
+    // Calculate distance to next node
+    final distToNext = _distanceToNextNode();
+    final distText = distToNext > 0 ? ' (${formatDistance(distToNext)})' : '';
+
+    if (nextNode.isDestination) {
+      return '📍 ${nextNode.displayName} ahead$distText';
+    }
+
+    return '$turnInstruction$distText';
+  }
+
+  /// Detailed instruction for the HUD showing next action.
+  String get nextTurnInstruction {
+    if (_activePath == null) return '';
+    final nodes = _activePath!.nodes;
+    if (_currentSegmentIndex + 2 >= nodes.length) return '';
+
+    final nextNode = nodes[_currentSegmentIndex + 1];
+    final afterNext = nodes[_currentSegmentIndex + 2];
+
+    if (afterNext.type == NodeType.stairs) return 'Then: stairs ahead';
+    if (afterNext.type == NodeType.lift) return 'Then: elevator ahead';
+
+    final bearing1 = _bearingBetweenNodes(nextNode, afterNext);
+    final bearing0 = _bearingBetweenNodes(
+      nodes[_currentSegmentIndex], nextNode,
+    );
+    final turn = _classifyTurn(bearing0, bearing1);
+    return 'Then: $turn';
+  }
+
+  /// Calculate bearing between two nav nodes (degrees, 0=North).
+  double _bearingBetweenNodes(NavNode from, NavNode to) {
+    final fromLatLng = localToLatLng(from.position, from.building);
+    final toLatLng = localToLatLng(to.position, to.building);
+    return calcBearing(fromLatLng, toLatLng);
+  }
+
+  /// Get turn instruction based on previous→current→next bearing change.
+  String _getTurnInstruction(NavNode current, NavNode next) {
+    final nodes = _activePath!.nodes;
+
+    if (_currentSegmentIndex == 0) {
+      // First segment — no previous bearing to compare
+      return '→ Head toward ${next.displayName}';
+    }
+
+    final prev = nodes[_currentSegmentIndex - 1];
+    final bearingPrevToCurrent = _bearingBetweenNodes(prev, current);
+    final bearingCurrentToNext = _bearingBetweenNodes(current, next);
+
+    return _classifyTurn(bearingPrevToCurrent, bearingCurrentToNext);
+  }
+
+  /// Classify turn direction from bearing change.
+  String _classifyTurn(double fromBearing, double toBearing) {
+    double angleDiff = (toBearing - fromBearing + 360) % 360;
+
+    if (angleDiff > 180) angleDiff -= 360;
+
+    if (angleDiff.abs() < 20) {
+      return '⬆️ Continue straight';
+    } else if (angleDiff >= 20 && angleDiff < 70) {
+      return '↗️ Bear right slightly';
+    } else if (angleDiff >= 70 && angleDiff < 120) {
+      return '➡️ Turn right';
+    } else if (angleDiff >= 120 && angleDiff < 160) {
+      return '↘️ Sharp right turn';
+    } else if (angleDiff <= -20 && angleDiff > -70) {
+      return '↖️ Bear left slightly';
+    } else if (angleDiff <= -70 && angleDiff > -120) {
+      return '⬅️ Turn left';
+    } else if (angleDiff <= -120 && angleDiff > -160) {
+      return '↙️ Sharp left turn';
+    } else {
+      return '🔄 U-turn';
+    }
+  }
+
+  /// Distance from user to the next node on the path (meters).
+  double _distanceToNextNode() {
+    if (_activePath == null || _userGpsPosition == null) return 0;
+    if (_currentSegmentIndex + 1 >= _activePath!.nodes.length) return 0;
+
+    final nextNode = _activePath!.nodes[_currentSegmentIndex + 1];
+    final nextLatLng = localToLatLng(nextNode.position, nextNode.building);
+    return calcDistance(_userGpsPosition!, nextLatLng);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -222,8 +370,8 @@ class NavigationProvider extends ChangeNotifier {
     if (node != null) {
       _selectedBuilding = node.building;
       _selectedFloor = node.floor;
-      // Set user GPS position to the start node's GPS coordinates
       _userGpsPosition = localToLatLng(node.position, node.building);
+      _previousSmoothedPosition = _userGpsPosition;
     }
     notifyListeners();
   }
@@ -235,13 +383,10 @@ class NavigationProvider extends ChangeNotifier {
 
   void toggleWheelchairMode() {
     _wheelchairMode = !_wheelchairMode;
-    if (_activePath != null) {
-      computePath();
-    }
+    if (_activePath != null) computePath();
     notifyListeners();
   }
 
-  /// Compute the optimal path using auto-selected algorithm.
   bool computePath() {
     if (_startNodeId == null || _destNodeId == null) return false;
 
@@ -250,18 +395,15 @@ class NavigationProvider extends ChangeNotifier {
     if (startNode == null || destNode == null) return false;
 
     final stopwatch = Stopwatch()..start();
-
     final isCrossFloor = startNode.floor != destNode.floor;
 
     if (isCrossFloor || graph.nodeCount > 100) {
-      // A* for cross-floor or large graphs
       _algorithmUsed = 'A*';
       final astar = AStarPathfinder(graph, wheelchairMode: _wheelchairMode);
       final result = astar.findPathWithStats(_startNodeId!, _destNodeId!);
       _activePath = result.path;
       _nodesExplored = result.nodesExplored;
     } else {
-      // Dijkstra for same-floor, small graphs
       _algorithmUsed = 'Dijkstra';
       final dijkstra = DijkstraPathfinder(graph, wheelchairMode: _wheelchairMode);
       _activePath = dijkstra.findPath(_startNodeId!, _destNodeId!);
@@ -284,7 +426,6 @@ class NavigationProvider extends ChangeNotifier {
     return _activePath != null;
   }
 
-  /// Find nearest amenity of a given type from start node.
   bool findNearestAmenity(NodeType type) {
     if (_startNodeId == null) return false;
     final dijkstra = DijkstraPathfinder(graph, wheelchairMode: _wheelchairMode);
@@ -325,11 +466,12 @@ class NavigationProvider extends ChangeNotifier {
     _distanceToDest = 0;
     _bearingToDest = 0;
     _remainingPathDistance = 0;
+    _previousSmoothedPosition = null;
+    _resetPedometer();
     stopGpsTracking();
     notifyListeners();
   }
 
-  /// Swap start and destination.
   void swapStartDest() {
     final tmp = _startNodeId;
     _startNodeId = _destNodeId;
@@ -339,10 +481,9 @@ class NavigationProvider extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // GPS LIVE TRACKING
+  // GPS LIVE TRACKING (with smoothing)
   // ═══════════════════════════════════════════════════════════
 
-  /// Start GPS live tracking.
   Future<void> startGpsTracking() async {
     if (!_gpsAvailable) {
       debugPrint('GPS not available — using simulation mode');
@@ -352,7 +493,7 @@ class NavigationProvider extends ChangeNotifier {
     // Get initial position
     final pos = await GpsService.instance.getCurrentPosition();
     if (pos != null) {
-      _userGpsPosition = pos;
+      _userGpsPosition = _smoothPosition(pos);
       _updateDistanceAndBearing();
       notifyListeners();
     }
@@ -360,42 +501,48 @@ class NavigationProvider extends ChangeNotifier {
     // Subscribe to position stream
     _gpsStreamSub?.cancel();
     _gpsStreamSub = GpsService.instance.getPositionStream(
-      distanceFilter: 3,
+      distanceFilter: 2, // More responsive: 2m instead of 3m
     ).listen(_onGpsUpdate);
 
     _isLiveTracking = true;
+
+    // Start pedometer
+    _startPedometer();
+
     notifyListeners();
   }
 
-  /// Stop GPS live tracking.
   void stopGpsTracking() {
     _gpsStreamSub?.cancel();
     _gpsStreamSub = null;
     _isLiveTracking = false;
+    _stopPedometer();
     notifyListeners();
   }
 
-  /// Called on each GPS position update.
+  /// Called on each GPS position update — applies smoothing + auto-advance.
   void _onGpsUpdate(GpsPosition pos) {
-    _userGpsPosition = pos.latLng;
+    // ── Feature 1: Smooth the position ──
+    _userGpsPosition = _smoothPosition(pos.latLng);
 
-    // Update device heading from GPS if available
+    // Update device heading from GPS if moving
     if (pos.heading > 0 && pos.speed > 0.5) {
       _deviceHeading = pos.heading;
     }
 
     _updateDistanceAndBearing();
-    _updateSegmentFromGps();
+
+    // ── Feature 3: Auto node switching ──
+    _autoAdvanceNode();
+
     notifyListeners();
   }
 
-  /// Update device heading from compass.
   void updateDeviceHeading(double heading) {
     _deviceHeading = heading;
     notifyListeners();
   }
 
-  /// Recalculate distance and bearing from user to destination.
   void _updateDistanceAndBearing() {
     final userPos = _userGpsPosition;
     final destPos = destinationLatLng;
@@ -406,68 +553,116 @@ class NavigationProvider extends ChangeNotifier {
     }
   }
 
-  /// Advance segment index based on GPS proximity to path nodes.
-  void _updateSegmentFromGps() {
+  /// Feature 3: Auto-advance to next node when user is close enough.
+  void _autoAdvanceNode() {
     if (_activePath == null || _userGpsPosition == null) return;
 
     final pathNodes = _activePath!.nodes;
 
-    // Find the closest path node to the user's GPS position
-    double minDist = double.infinity;
-    int closestIdx = _currentSegmentIndex;
-
+    // Check nodes ahead (not behind) to avoid going backwards
     for (int i = _currentSegmentIndex; i < pathNodes.length; i++) {
       final nodeLatLng = localToLatLng(pathNodes[i].position, pathNodes[i].building);
       final dist = calcDistance(_userGpsPosition!, nodeLatLng);
-      if (dist < minDist) {
-        minDist = dist;
-        closestIdx = i;
+
+      if (dist < _autoAdvanceThreshold && i > _currentSegmentIndex) {
+        _currentSegmentIndex = i;
+        _selectedFloor = pathNodes[i].floor;
+        _remainingPathDistance = _activePath!.remainingDistance(i);
+        debugPrint('📍 Auto-advanced to node $i: ${pathNodes[i].displayName}');
+        break;
       }
     }
+  }
 
-    // Advance segment if we're close enough to the next node
-    if (closestIdx > _currentSegmentIndex && minDist < _segmentProximity) {
-      _currentSegmentIndex = closestIdx;
-      _selectedFloor = pathNodes[closestIdx].floor;
-      _remainingPathDistance = _activePath!.remainingDistance(closestIdx);
+  // ═══════════════════════════════════════════════════════════
+  // PEDOMETER (Feature 4)
+  // ═══════════════════════════════════════════════════════════
+
+  void _startPedometer() {
+    _stepCountAtStart = -1;
+    _stepsWalked = 0;
+    _walkedDistance = 0.0;
+
+    try {
+      _pedometerSub?.cancel();
+      _pedometerSub = Pedometer.stepCountStream.listen(
+        (StepCount event) {
+          if (_stepCountAtStart < 0) {
+            _stepCountAtStart = event.steps;
+          }
+          _currentStepCount = event.steps;
+          _stepsWalked = _currentStepCount - _stepCountAtStart;
+          _walkedDistance = _stepsWalked * _stepLength;
+          _pedometerAvailable = true;
+          notifyListeners();
+        },
+        onError: (error) {
+          debugPrint('Pedometer error: $error');
+          _pedometerAvailable = false;
+        },
+      );
+    } catch (e) {
+      debugPrint('Pedometer not available: $e');
+      _pedometerAvailable = false;
     }
+  }
+
+  void _stopPedometer() {
+    _pedometerSub?.cancel();
+    _pedometerSub = null;
+  }
+
+  void _resetPedometer() {
+    _stepCountAtStart = -1;
+    _stepsWalked = 0;
+    _walkedDistance = 0.0;
+    _stopPedometer();
+  }
+
+  /// Configure step length (meters per step).
+  void setStepLength(double length) {
+    _stepLength = length.clamp(0.4, 1.2);
+    _walkedDistance = _stepsWalked * _stepLength;
+    notifyListeners();
   }
 
   // ═══════════════════════════════════════════════════════════
   // SIMULATION MODE (for emulator/desktop)
   // ═══════════════════════════════════════════════════════════
 
-  /// Simulate walking along the path by interpolating GPS positions.
   void simulateStep() {
     if (_activePath == null) return;
 
     final pathLatlngs = pathLatLngs;
     if (pathLatlngs.isEmpty) return;
 
-    // Advance simulation index
     _simulationIndex++;
     if (_simulationIndex >= pathLatlngs.length) {
       _simulationIndex = pathLatlngs.length - 1;
     }
 
-    // Set user position to the interpolated point
     _userGpsPosition = pathLatlngs[_simulationIndex];
-
-    // Update segment
+    _previousSmoothedPosition = _userGpsPosition;
     _currentSegmentIndex = _simulationIndex.clamp(0, _activePath!.nodes.length - 2);
     _selectedFloor = _activePath!.nodes[_currentSegmentIndex].floor;
     _remainingPathDistance = _activePath!.remainingDistance(_currentSegmentIndex);
-    _updateDistanceAndBearing();
 
+    // Simulate pedometer steps
+    _stepsWalked += 2;
+    _walkedDistance = _stepsWalked * _stepLength;
+
+    _updateDistanceAndBearing();
     notifyListeners();
   }
 
-  /// Reset simulation to the start of the path.
   void resetSimulation() {
     _simulationIndex = 0;
     _currentSegmentIndex = 0;
+    _stepsWalked = 0;
+    _walkedDistance = 0;
     if (_activePath != null) {
       _userGpsPosition = pathLatLngs.isNotEmpty ? pathLatLngs.first : null;
+      _previousSmoothedPosition = _userGpsPosition;
       _remainingPathDistance = _activePath!.totalDistance;
       _selectedFloor = _activePath!.nodes.first.floor;
       _updateDistanceAndBearing();
@@ -482,8 +677,6 @@ class NavigationProvider extends ChangeNotifier {
   void blockEdge(String edgeId) {
     graph.disableEdge(edgeId);
     _blockedEdges.add(edgeId);
-
-    // If active path is affected, reroute
     if (_activePath != null && _activePath!.containsEdge(edgeId)) {
       computePath();
     }
@@ -498,7 +691,6 @@ class NavigationProvider extends ChangeNotifier {
 
   void reroute() {
     if (_startNodeId == null || _destNodeId == null) return;
-    // Use A* for reroute since we want the fastest path
     _algorithmUsed = 'A*';
     final astar = AStarPathfinder(graph, wheelchairMode: _wheelchairMode);
     final result = astar.findPathWithStats(_startNodeId!, _destNodeId!);
@@ -558,11 +750,15 @@ class NavigationProvider extends ChangeNotifier {
     'userGps': _userGpsPosition?.toString(),
     'distanceToDest': _distanceToDest,
     'bearingToDest': _bearingToDest,
+    'stepsWalked': _stepsWalked,
+    'walkedDistance': _walkedDistance,
+    'pedometerAvailable': _pedometerAvailable,
   };
 
   @override
   void dispose() {
     _gpsStreamSub?.cancel();
+    _pedometerSub?.cancel();
     super.dispose();
   }
 }
